@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS jobs (
                                    'interview', 'rejected', 'stale')),
   filter_reason  text,
   filter_attempts integer NOT NULL DEFAULT 0,
+  -- Set while a job is part of an in-flight Message Batch. A batch can take
+  -- hours, which is far longer than the stale-claim window, so the reclaim sweep
+  -- must leave these alone or it would abandon work already paid for.
+  filter_batch_id text,
   -- generate.js's own attempt counter, mirroring filter_attempts. A resume that
   -- cannot be built (a gate that never passes for this JD) must stop retrying
   -- forever, and it must not consume the filter's budget to do so.
@@ -118,6 +122,11 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applied_method       text
   CHECK (applied_method IS NULL OR applied_method IN ('agent', 'manual'));
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_attempts integer NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_error    text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS filter_batch_id text;
+
+-- Resuming an in-flight batch after a crash: find every job still attached to it.
+CREATE INDEX IF NOT EXISTS jobs_filter_batch_idx
+  ON jobs (filter_batch_id) WHERE filter_batch_id IS NOT NULL;
 
 -- The status vocabulary grew with stage 3. ADD COLUMN IF NOT EXISTS cannot widen
 -- an existing CHECK, so the constraint is dropped and rebuilt; it must match the

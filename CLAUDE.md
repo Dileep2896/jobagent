@@ -85,6 +85,29 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   number, so sorting or deleting rows by hand cannot corrupt the mapping.
   Needs the SAME service account as drive-upload.js, plus the Sheets API
   enabled and the sheet shared with the service account as Editor.
+- Filter cost control, in the order it applies (built 2026-07-28):
+  1. A deterministic TITLE pre-filter settles ~half the backlog with no API call.
+     Measured on the real 734: 362 disqualified, 372 still need the model. It is
+     title-only on purpose — description text is far too easy to misread ("you
+     will partner with our sales team" is not a sales role) and a false negative
+     is silent and permanent. Every exclusion has an escape hatch: a title
+     matching any engineering signal is never pre-filtered, which is what keeps
+     "Backend Engineer, Billing/Tax" out of the bin. Audited: 0 of the 362 killed
+     titles contain engineer/developer/software/backend/architect/SRE.
+     Term lists are overridable via targets.title_exclusions and
+     targets.title_engineering_signals in master-facts.json.
+     `node filter.js --prefilter-dry-run` reports without writing.
+  2. `--batch` sends the rest through the Message Batches API at half price.
+     Together: 734 calls -> 372 at half price, roughly a quarter of the original cost.
+     A batch can run for hours, far past STALE_CLAIM_MINUTES, so an in-flight job
+     carries filter_batch_id and the stale sweep SKIPS those rows — otherwise the
+     next run would pay to classify them a second time. The id is written before
+     the first poll, and resumeBatches() picks up a batch left by a crashed run
+     rather than resubmitting it.
+  3. NO prompt caching, and this is deliberate: the system prompt is ~860 tokens
+     against Haiku's 4096-token minimum cacheable prefix, so a cache_control
+     breakpoint would be a silent no-op. Revisit only if the prompt grows past
+     4096 tokens.
 - Filter scoring uses the career-ops A-F rubric (MIT, attributed in filter.js):
   cv_match .45, north_star .30, culture .15, comp .10; shortlist at >= 3.5.
   Comp returns 0 for "insufficient data" when a posting states no salary, and

@@ -85,6 +85,32 @@
     "practices": ["Distributed systems", "Observability", "CI/CD"]
   },
 
+  "targets": {
+    "_README": [
+      "What you are actually looking for. filter.js builds its whole candidate",
+      "profile from this block, so the facts stay the single source.",
+      "archetypes and hard_blockers are REQUIRED — filter.js throws without them.",
+      "",
+      "title_exclusions / title_engineering_signals are OPTIONAL and drive the",
+      "deterministic pre-filter, which disqualifies a posting on its title alone",
+      "with no API call. Roughly half a typical board is Counsel / Recruiter /",
+      "Account Executive, and paying a model to notice that is waste.",
+      "A title matching any signal is NEVER pre-filtered, whatever else it says:",
+      "that is what keeps 'Backend Engineer, Billing/Tax' out of the bin.",
+      "Omit both to use filter.js's defaults, which suit a software engineer."
+    ],
+    "archetypes": ["Software Engineer", "Full-Stack Engineer"],
+    "seniority": "Mid-level individual contributor. Not management, not new-grad.",
+    "locations": ["San Francisco Bay Area", "Remote (US)"],
+    "hard_blockers": [
+      "Requires an active US security clearance",
+      "Explicitly states it cannot sponsor a visa at any point",
+      "Primarily sales, recruiting, manual QA, or IT support rather than software engineering"
+    ],
+    "title_exclusions": ["account executive", "recruiter", "counsel", "paralegal"],
+    "title_engineering_signals": ["engineer", "developer", "software", "backend"]
+  },
+
   "screening_answers": {
     "_README": [
       "Answers to ATS screening questions. These are legal attestations to an",
