@@ -88,15 +88,19 @@ function truncate(s, n) {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
+function summaryLine(by) {
+  return (
+    `Pipeline: ${by.new || 0} awaiting filter · ${by.shortlisted || 0} shortlisted · ` +
+    `${by.filtered_out || 0} filtered out` +
+    (by.filter_failed ? ` · ${by.filter_failed} failed` : '')
+  );
+}
+
 function buildLines(digest) {
   const { by, fresh, overflow } = digest;
   const lines = [];
 
-  lines.push(
-    `Pipeline: ${by.new || 0} awaiting filter · ${by.shortlisted || 0} shortlisted · ` +
-      `${by.filtered_out || 0} filtered out` +
-      (by.filter_failed ? ` · ${by.filter_failed} failed` : '')
-  );
+  lines.push(summaryLine(by));
 
   if (fresh.length === 0) {
     lines.push('', 'No new shortlisted jobs since the last digest.');
@@ -133,14 +137,75 @@ function chunk(lines, limit) {
   return chunks;
 }
 
+// Discord's documented ceilings. The 6000-char cap is across ALL embeds in a
+// message, not per embed, and exceeding any of these is a 400 — so chunking
+// has to respect both the count and the running character total.
+const DISCORD = { embedsPerMessage: 10, totalEmbedChars: 6000, title: 256, description: 4096 };
+
+/** Rich embeds: each job becomes a tappable card rather than a line of text. */
+function buildDiscordPayloads(digest) {
+  const { by, fresh, overflow } = digest;
+  const summary = summaryLine(by);
+
+  if (fresh.length === 0) {
+    return [
+      {
+        content: `${summary}\n\nNo new shortlisted jobs since the last digest.`,
+        allowed_mentions: { parse: [] },
+      },
+    ];
+  }
+
+  const embeds = fresh.map((j) => {
+    const e = {
+      title: truncate(`${j.company} — ${j.title || '(untitled)'}`, DISCORD.title - 6),
+      description: truncate(j.filter_reason || '', 300),
+      color: 0x2ea043,
+    };
+    if (j.url) e.url = j.url; // makes the title tappable
+    if (j.location) e.footer = { text: truncate(j.location, 100) };
+    return e;
+  });
+
+  const size = (e) =>
+    (e.title || '').length + (e.description || '').length + ((e.footer && e.footer.text) || '').length;
+
+  const groups = [];
+  let group = [];
+  let chars = 0;
+  for (const e of embeds) {
+    if (group.length >= DISCORD.embedsPerMessage || chars + size(e) > DISCORD.totalEmbedChars) {
+      groups.push(group);
+      group = [];
+      chars = 0;
+    }
+    group.push(e);
+    chars += size(e);
+  }
+  if (group.length) groups.push(group);
+
+  return groups.map((g, i) => {
+    const payload = { embeds: g, allowed_mentions: { parse: [] } };
+    if (i === 0) {
+      payload.content =
+        `${summary}\n\n**${fresh.length} new shortlisted job${fresh.length === 1 ? '' : 's'} to review:**`;
+    }
+    if (i === groups.length - 1) {
+      const tail = ['Nothing has been submitted — these need your review.'];
+      if (overflow > 0) tail.unshift(`…and ${overflow} more, queued for the next digest.`);
+      payload.content = `${payload.content ? `${payload.content}\n` : ''}${tail.join('\n')}`;
+    }
+    return payload;
+  });
+}
+
 function buildPayloads(platform, digest) {
-  const lines = buildLines(digest);
-  const limit = platform === 'discord' ? 1900 : 2900;
-  return chunk(lines, limit).map((text) =>
-    platform === 'discord'
-      ? { content: text, allowed_mentions: { parse: [] } }
-      : { text, unfurl_links: false, unfurl_media: false }
-  );
+  if (platform === 'discord') return buildDiscordPayloads(digest);
+  return chunk(buildLines(digest), 2900).map((text) => ({
+    text,
+    unfurl_links: false,
+    unfurl_media: false,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +290,15 @@ async function main() {
 
   if (dryRun) {
     log(`[dry run] ${platform}, ${payloads.length} message(s):`);
-    for (const p of payloads) console.log('---\n' + (p.content || p.text));
+    for (const p of payloads) {
+      console.log('---');
+      if (p.content || p.text) console.log(p.content || p.text);
+      for (const e of p.embeds || []) {
+        console.log(`  [${e.title}]${e.url ? ` <${e.url}>` : ''}`);
+        if (e.description) console.log(`     ${e.description}`);
+        if (e.footer) console.log(`     (${e.footer.text})`);
+      }
+    }
     return;
   }
 

@@ -82,9 +82,24 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   2000-char Discord cap, and failure leaving nothing marked notified.
   NOT yet pointed at a real webhook — needs a URL from the user.
 
+- master-facts.json BUILT from MASTER_RESUME.md in Drive (Job Applications/
+  Master Resume). 24 verified facts, 6 roles, 10 projects, 2 patents, 2
+  publications. Validates clean. Gitignored — personal history + attestations.
+  Work auth transcribed: F-1 OPT (STEM), will need H-1B sponsorship later.
+  Still blank and must be answered by the human before submit is enabled:
+  willing_to_relocate, desired_salary, notice_period, years_of_experience.
+- Notifications will use Discord (Slack needs a workspace). notify.js renders
+  rich embeds on Discord so job titles are tappable; limits asserted against
+  Discord's 10-embed / 6000-char / 2000-char content caps.
+- Reference: github.com/santifer/career-ops (MIT, 62k stars) — same problem
+  space, but runs interactively via an AI CLI rather than headless from cron.
+  Worth mining for its five-dimension scoring rubric and ATS resume template
+  when building generate; not worth adopting wholesale, since our constraint
+  is unattended operation on a box that drops wifi.
+
 ## Next
-1. Replace CANDIDATE_PROFILE in filter.js — it is a placeholder and every
-   verdict depends on it.
+1. Set CANDIDATE_PROFILE in filter.js from master-facts.json — it is still the
+   placeholder, and every one of the 733 verdicts depends on it.
 2. Configure Anthropic credentials on this box.
 3. `node filter.js --once --limit 5` to sanity-check verdicts and per-job cost
    before running the full 733-job backlog.
