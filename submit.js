@@ -16,6 +16,10 @@
  *   6. A form was actually found: a resume upload was accepted and at least
  *      MIN_FILLED_FIELDS controls were populated. Guard 5 alone is trivially
  *      satisfied by a page with no form on it.
+ *   7. The resume on disk is the one generate.js built for THIS job, checked by
+ *      its deterministic filename.
+ *   8. The resume is STILL attached at the moment of the click. Guards 6 and 7
+ *      both run too early to see a board that drops the upload afterwards.
  *
  * Guard 5 matters as much as the approval: an approved-but-incomplete
  * application is just as damaging as a wrong one, and the board's own scripts
@@ -273,6 +277,33 @@ async function main() {
       : null;
     const submitEl = btn || (await byText);
     if (!submitEl) throw new Error('could not find a submit control on the form');
+
+    // ---- Guard 8: the resume must still be attached AT THE CLICK ----------
+    //
+    // Every earlier check happens too early to see this. Greenhouse uploads the
+    // file to S3 (201) and then REMOVES the file input from the DOM, so
+    // auditRequired finds no required file control to check, and guard 6 proved
+    // the resume was attached during filling — minutes and nineteen fields
+    // earlier. A real submission of job 66 was rejected by Stripe with
+    // "Resume/CV is required" while every one of our guards had passed.
+    //
+    // So re-read the page immediately before clicking: the filename must be
+    // visible and no required-field error may be showing.
+    const resumeName = path.basename(job.resume_path);
+    const stillAttached = await page.evaluate((name) => {
+      const text = document.body.innerText || '';
+      return { hasName: text.includes(name), hasError: /is required/i.test(text) };
+    }, resumeName);
+    if (!stillAttached.hasName || stillAttached.hasError) {
+      await recordBlocker(
+        `resume no longer attached at submit time (filename visible: ${stillAttached.hasName}, ` +
+        `form showing a required-field error: ${stillAttached.hasError})`
+      );
+      throw new Error(
+        `resume is not attached at submit time — the board dropped it after upload. ` +
+        `Nothing was clicked. Screenshot: ${before}`
+      );
+    }
 
     log('submitting…');
     await submitEl.click();
