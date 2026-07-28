@@ -65,7 +65,14 @@ function tex(s) {
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
     .replace(/[–—]/g, '--')
-    .replace(/…/g, '...');
+    .replace(/…/g, '...')
+    // A hyphen with spaces around it is an en dash doing a dash's job, and in
+    // Charter it renders as a cramped stub. master-facts.json uses that form as a
+    // separator throughout ("Founder - Software Engineer", "1st Place -
+    // HackWithBay 3.0", "VeriGraph - Papers to Executable Evidence"), so this is
+    // the one place to correct it. Unspaced hyphens are left alone: "2019-2023",
+    // "offline-first" and "Linux-based" are all correct as written.
+    .replace(/ - /g, ' -- ');
 }
 
 /**
@@ -407,6 +414,23 @@ function renderHeadline(job, facts) {
   return tex(raw || (facts.targets && facts.targets.headline) || 'Software Engineer');
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * "2025-07" -> "Jul 2025". master-facts.json stores ISO months because they sort
+ * and compare correctly in the selection code; printing them raw put
+ * "2025-07 - Present" on the page, which reads as machine output rather than a
+ * resume. Anything that is not an ISO month passes through untouched.
+ */
+function monthYear(v) {
+  const s = String(v || '').trim();
+  if (s.toLowerCase() === 'present') return 'Present';
+  const m = s.match(/^(\d{4})-(\d{2})$/);
+  if (!m) return s;
+  const i = Number(m[2]) - 1;
+  return MONTHS[i] ? `${MONTHS[i]} ${m[1]}` : s;
+}
+
 function renderExperience(roles) {
   if (!roles.length) return '';
   // A role with no surviving bullets is dropped entirely. Emitting the entry
@@ -417,7 +441,7 @@ function renderExperience(roles) {
 
   const out = [heading('Experience'), ''];
   for (const r of withBullets) {
-    const dates = `${tex(r.role.start)} -- ${tex(r.role.end === 'present' ? 'Present' : r.role.end)}`;
+    const dates = `${tex(monthYear(r.role.start))} -- ${tex(monthYear(r.role.end))}`;
     const right = [tex(r.role.location || ''), dates].filter(Boolean).join(' \\textbar{} ');
     // No \textbf here: \entry already bolds its first argument, so wrapping the
     // company again nested \textbf inside \textbf.
@@ -517,6 +541,20 @@ function renderSkills(skills) {
   return out.join('\n');
 }
 
+// A GPA earns its space only when it argues for the candidate. Below roughly a
+// 3.5/4.0 it is neutral at best and invites a question the resume cannot answer,
+// so the degree stands alone. Expressed as a ratio so a 10-point scale works too.
+const GPA_SHOW_AT = 3.5 / 4;
+
+function gpaWorthShowing(gpa) {
+  const m = String(gpa || '').match(/^\s*([\d.]+)\s*(?:\/\s*([\d.]+))?/);
+  if (!m) return false;
+  const value = parseFloat(m[1]);
+  const scale = m[2] ? parseFloat(m[2]) : 4;
+  if (!Number.isFinite(value) || !Number.isFinite(scale) || scale <= 0) return false;
+  return value / scale >= GPA_SHOW_AT;
+}
+
 function renderEducation(education) {
   if (!education.length) return '';
   // One line per entry: a separate GPA line costs as much vertical space as a
@@ -527,7 +565,7 @@ function renderEducation(education) {
   // of the degree.
   const out = [heading('Education'), ''];
   for (const e of education) {
-    const left = [`${tex(e.credential)} --- ${tex(e.institution)}`, e.gpa ? `GPA ${tex(e.gpa)}` : '']
+    const left = [`${tex(e.credential)} --- ${tex(e.institution)}`, gpaWorthShowing(e.gpa) ? `GPA ${tex(e.gpa)}` : '']
       .filter(Boolean).join(', ');
     const year = String(e.end || '').slice(0, 4);
     out.push(`\\entry{${left}}{${tex(year)}}`);
@@ -543,13 +581,7 @@ function renderSummary(facts, job, selection) {
   const top = (facts.roles || [])[0];
   if (!top) return '';
 
-  // Three sentences: who they are, what of the posting's stack they actually work
-  // in, and the credentials the bullets cannot show.
-  //
-  // The middle sentence is how the JD gets woven in truthfully: it is the
-  // INTERSECTION of the candidate's own skill lists with the posting's vocabulary,
-  // so every term is both in the JD and already claimed in master-facts.json.
-  // Nothing is added because the posting asked for it.
+  // Two sentences: who they are, and the credentials the bullets cannot show.
   //
   // LIMIT, worth being honest about: assembling sentences is not writing one. A
   // summary that argues why this candidate fits THIS team needs either a model call
@@ -558,40 +590,23 @@ function renderSummary(facts, job, selection) {
   const clean = (s) => String(s).replace(/\.$/, '');
   const sentences = [];
 
+  // The company name keeps its own period: clean() exists to stop a field that
+  // already ends a sentence from producing "..", and applying it to "Metis AI
+  // Inc." abbreviated the employer to "Metis AI Inc" in the summary while
+  // Experience printed it correctly two inches below. Collapse the doubled stop
+  // instead, which handles the abbreviation without truncating it.
   const years = (facts.screening_answers || {}).years_of_experience;
-  const identity = `${clean(top.title)} at ${clean(top.company)}` +
+  const identity = `${clean(top.title)} at ${top.company}` +
     (years ? `, with ${tex(String(years))} years of professional engineering experience` : '');
-  sentences.push(`${tex(identity)}.`);
+  sentences.push(`${tex(identity)}.`.replace(/\.\.$/, '.'));
 
-  // Two tiers, not one list: skills the posting's TITLE names come first, then
-  // the rest of the overlap in authored order. Only seven survive the slice, and
-  // filling them from whatever happened to appear in the company blurb led this
-  // sentence with "Java, C++, Android (Kotlin/Java)" on a backend billing role.
-  const sig = jdSignals(job);
-  const titled = [];
-  const rest = [];
-  // Walk the SELECTED groups, in the order the Skills block will print them.
-  // Reading facts.skills directly meant the summary drew from authoring order,
-  // so a backend data posting opened with "Android (Kotlin/Java)" while Mobile
-  // ranked fourth in the block below it. This also guarantees the summary can
-  // only name skills the page actually shows.
-  const source = selection && Object.keys(selection.skills || {}).length
-    ? selection.skills
-    : facts.skills || {};
-  for (const [group, list] of Object.entries(source)) {
-    if (group.startsWith('_') || group === 'spoken_languages') continue;
-    for (const s of list || []) {
-      const words = skillWords(s);
-      if (titled.includes(s) || rest.includes(s)) continue;
-      if (words.some((w) => sig.title.has(w))) titled.push(s);
-      else if (words.some((w) => sig.all.has(w))) rest.push(s);
-    }
-  }
-  const overlap = [...titled, ...rest];
-  if (overlap.length >= 3) {
-    sentences.push(`Works day to day in ${tex(overlap.slice(0, 7).map(skillCase).join(', '))}.`);
-  }
-
+  // NO stack sentence here, deliberately.
+  //
+  // This used to be "Works day to day in <7 skills the posting also names>",
+  // which put the same terms within an inch of the Skills block directly below
+  // it — the reader sees them twice and the summary earns none of its line. The
+  // JD-coverage gate is unaffected: the Skills block still carries those terms
+  // onto the page, which is what the gate measures.
   const edu = (facts.education || [])[0];
   const credentials = [];
   if (edu) credentials.push(`${clean(edu.credential)}, ${clean(edu.institution)}`);
@@ -631,8 +646,8 @@ function renderMarkdown(facts, job, sel) {
 
   out.push('## Experience', '');
   for (const r of sel.roles.filter((r) => r.bullets.length)) {
-    const end = r.role.end === 'present' ? 'Present' : r.role.end;
-    out.push(`**${r.role.company} — ${r.role.title}**  `, `${r.role.location || ''} | ${r.role.start} – ${end}`, '');
+    out.push(`**${r.role.company} — ${r.role.title}**  `,
+      `${r.role.location || ''} | ${monthYear(r.role.start)} – ${monthYear(r.role.end)}`, '');
     for (const b of r.bullets) out.push(`- ${b.fact.text}`);
     out.push('');
   }
@@ -658,7 +673,8 @@ function renderMarkdown(facts, job, sel) {
 
   out.push('## Education', '');
   for (const e of sel.education) {
-    out.push(`**${e.credential} — ${e.institution}**${e.gpa ? `, GPA ${e.gpa}` : ''} | ${String(e.end || '').slice(0, 4)}  `, '');
+    const gpa = gpaWorthShowing(e.gpa) ? `, GPA ${e.gpa}` : '';
+    out.push(`**${e.credential} — ${e.institution}**${gpa} | ${String(e.end || '').slice(0, 4)}  `, '');
   }
 
   const awards = (facts.awards || []).filter((a) => a.verified === true);
