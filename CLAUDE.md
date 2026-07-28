@@ -58,8 +58,24 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   claude.ai MCP connectors. Those connectors are scoped to an interactive chat
   session and are unavailable to cron. Slack needs an incoming webhook URL;
   Drive needs a service-account JSON key (drive.file scope only).
-- Drive destination folder "Job Applications":
-  1IGsxWbde4zPW-FTdVPocresJzIFxO3rZ  (owner dkus2896@gmail.com)
+- Google auth is SPLIT, for a reason worth remembering:
+  * Drive uploads authenticate AS THE USER via `gcloud auth application-default
+    login` (see ./gcloud-login.sh). A service account CANNOT be used: it has no
+    storage quota on a personal Google account and cannot own a file outside a
+    Workspace Shared Drive.
+  * Sheets uses the SERVICE ACCOUNT key (GOOGLE_APPLICATION_CREDENTIALS,
+    jobagent@jobagent-503807.iam.gserviceaccount.com). Editing an existing
+    sheet creates no file, so no quota is involved. The sheet must be shared
+    with that address as Editor.
+  * ADC also needs a quota project; the x-goog-user-project header is sent
+    explicitly because we hand-roll fetch rather than letting the auth library
+    make the request.
+- Drive folder for generated resumes: 1Omvk2frDeIIGbKWvb_5LUhTeKAWE68X_
+  ("Job Applications (jobagent)"). It had to be created BY THIS APP via
+  `node drive-upload.js --init`: the drive.file scope is a per-APPLICATION
+  grant, so the older folder made through the claude.ai connector is invisible
+  here even though the same user owns it. That older folder still holds
+  MASTER_RESUME.md and is untouched.
 - Tracking sheet "Job Applications Tracker":
   1aAGCe9Gvi8J4WT3blsAj1mRFCrNPS9UQFk8A6ocZHTM  (inside that folder)
   APPLIED JOBS ONLY — one row per real submission (applied_at IS NOT NULL),

@@ -49,14 +49,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const backoffMs = (n) => Math.floor(Math.random() * Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** n));
 
 async function getToken() {
-  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    throw new Error('GOOGLE_APPLICATION_CREDENTIALS is not set — point it at the service account JSON key.');
+  // Two credential paths:
+  //  - GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account key, OR
+  //  - Application Default Credentials from `gcloud auth application-default
+  //    login`, which authenticate AS YOU.
+  //
+  // For a personal Gmail account the second is the only one that works for
+  // Drive: service accounts have no storage quota and cannot own a file
+  // outside a Workspace Shared Drive. Files created via ADC are owned by you
+  // and count against your own quota, which is what we want anyway.
+  const auth = new GoogleAuth({ scopes: SCOPES });
+  try {
+    const client = await auth.getClient();
+    const { token } = await client.getAccessToken();
+    if (!token) throw new Error('no access token returned');
+    return token;
+  } catch (e) {
+    throw new Error(
+      `could not obtain Google credentials: ${e.message}\n` +
+      `  Sheets only EDITS an existing spreadsheet, so a service account works here\n` +
+      `  (no file is created, so no storage quota is involved):\n` +
+      `    export GOOGLE_APPLICATION_CREDENTIALS=~/.config/jobagent/gdrive.json\n` +
+      `  and share the sheet with the key's client_email as Editor.`
+    );
   }
-  const client = await new GoogleAuth({ scopes: SCOPES }).getClient();
-  const { token } = await client.getAccessToken();
-  if (!token) throw new Error('service account returned no access token');
-  return token;
 }
+
 
 async function request(url, options = {}) {
   let lastErr;

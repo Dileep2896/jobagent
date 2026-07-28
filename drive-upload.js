@@ -25,6 +25,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { GoogleAuth } = require('google-auth-library');
 const { Pool } = require('pg');
 
@@ -47,24 +48,63 @@ const MIME_BY_EXT = {
 };
 
 async function getToken() {
-  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  // Two credential paths:
+  //  - GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account key, OR
+  //  - Application Default Credentials from `gcloud auth application-default
+  //    login`, which authenticate AS YOU.
+  //
+  // For a personal Gmail account the second is the only one that works for
+  // Drive: service accounts have no storage quota and cannot own a file
+  // outside a Workspace Shared Drive. Files created via ADC are owned by you
+  // and count against your own quota, which is what we want anyway.
+  // Drive uploads CREATE files, and a service account has no storage quota on
+  // a personal Google account — it cannot own a file outside a Workspace
+  // Shared Drive. So this path deliberately ignores any service-account key
+  // and authenticates as the user via ADC, which makes YOU the file owner.
+  // (sheets-sync.js is the opposite case: it only edits an existing sheet, so
+  // the service account is fine there.)
+  delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  const auth = new GoogleAuth({ scopes: SCOPES });
+  try {
+    const client = await auth.getClient();
+    const { token } = await client.getAccessToken();
+    if (!token) throw new Error('no access token returned');
+
+    // ADC requires a quota project for Drive, sent as x-goog-user-project.
+    // The auth library adds this itself when IT makes the request — but we
+    // hand-roll fetch with just the bearer token, so it has to be added here
+    // or every call 403s with "requires a quota project".
+    let quotaProject = process.env.GOOGLE_CLOUD_PROJECT || client.quotaProjectId || null;
+    if (!quotaProject) {
+      const adc = path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
+      if (fs.existsSync(adc)) {
+        try { quotaProject = JSON.parse(fs.readFileSync(adc, 'utf8')).quota_project_id || null; } catch {}
+      }
+    }
+    return { token, quotaProject };
+  } catch (e) {
     throw new Error(
-      'GOOGLE_APPLICATION_CREDENTIALS is not set — point it at the service account JSON key.'
+      `could not obtain Google credentials: ${e.message}\n` +
+      `  Drive uploads must authenticate as you (a service account has no storage quota):\n` +
+      `    gcloud auth application-default login --no-launch-browser \\\n` +
+      `      --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.file`
     );
   }
-  const auth = new GoogleAuth({ scopes: SCOPES });
-  const client = await auth.getClient();
-  const { token } = await client.getAccessToken();
-  if (!token) throw new Error('failed to obtain an access token from the service account');
-  return token;
 }
+
 
 /**
  * Drive has no unique-name constraint: uploading the same resume twice creates
  * two files with the same name. Since the pipeline must be safe to re-run, look
  * for an existing copy and update it in place instead.
  */
-async function findExisting(token, name) {
+function authHeaders(auth) {
+  const h = { authorization: `Bearer ${auth.token}` };
+  if (auth.quotaProject) h['x-goog-user-project'] = auth.quotaProject;
+  return h;
+}
+
+async function findExisting(auth, name) {
   const q = [
     `name = '${name.replace(/'/g, "\\'")}'`,
     FOLDER_ID ? `'${FOLDER_ID}' in parents` : null,
@@ -77,7 +117,7 @@ async function findExisting(token, name) {
     'https://www.googleapis.com/drive/v3/files' +
     `?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1`;
 
-  const res = await request(url, { headers: { authorization: `Bearer ${token}` } });
+  const res = await request(url, { headers: authHeaders(auth) });
   const body = await res.json();
   return body.files && body.files[0] ? body.files[0].id : null;
 }
@@ -100,8 +140,10 @@ async function request(url, options) {
       // user decode a raw 404 from the API.
       if (res.status === 404 && FOLDER_ID) {
         err.message +=
-          `\n  A 404 here usually means the folder was never shared with the service account.` +
-          `\n  Share folder ${FOLDER_ID} with the client_email in your key file, as Editor.`;
+          `\n  The drive.file scope only grants access to files THIS app created —` +
+          `\n  a folder made by another app (or by hand in the Drive UI) is invisible` +
+          `\n  to it even though you own it.` +
+          `\n  Create one this app owns:  node drive-upload.js --init`;
       }
       throw err;
     } catch (e) {
@@ -124,9 +166,9 @@ async function uploadFile(filePath, displayName) {
   const name = displayName || path.basename(abs);
   const mime = MIME_BY_EXT[path.extname(abs).toLowerCase()] || 'application/octet-stream';
   const bytes = fs.readFileSync(abs);
-  const token = await getToken();
+  const auth = await getToken();
 
-  const existingId = await findExisting(token, name);
+  const existingId = await findExisting(auth, name);
   const metadata = existingId
     ? { name } // parents cannot be changed via the update endpoint
     : { name, ...(FOLDER_ID ? { parents: [FOLDER_ID] } : {}) };
@@ -146,10 +188,7 @@ async function uploadFile(filePath, displayName) {
 
   const res = await request(url, {
     method: existingId ? 'PATCH' : 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      'content-type': `multipart/related; boundary=${boundary}`,
-    },
+    headers: { ...authHeaders(auth), 'content-type': `multipart/related; boundary=${boundary}` },
     body,
   });
 
@@ -157,17 +196,47 @@ async function uploadFile(filePath, displayName) {
   return { ...file, replaced: Boolean(existingId) };
 }
 
+/**
+ * Create a Drive folder this application can actually address.
+ *
+ * drive.file is a per-APP grant, not a per-user one: it can only touch files
+ * it created itself. A folder created through a different app is invisible
+ * here, so the pipeline makes its own. The folder is still owned by you and
+ * appears normally in your Drive.
+ */
+async function initFolder() {
+  const auth = await getToken();
+  const name = process.env.GDRIVE_FOLDER_NAME || 'Job Applications (jobagent)';
+
+  const res = await request('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink', {
+    method: 'POST',
+    headers: { ...authHeaders(auth), 'content-type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder' }),
+  });
+  const folder = await res.json();
+  log(`created folder "${folder.name}"`);
+  log(`  id:   ${folder.id}`);
+  log(`  link: https://drive.google.com/drive/folders/${folder.id}`);
+  log('');
+  log('Put this in .env (replacing any existing GDRIVE_FOLDER_ID):');
+  log(`  export GDRIVE_FOLDER_ID='${folder.id}'`);
+  return folder;
+}
+
 async function check() {
-  const token = await getToken();
-  const creds = JSON.parse(fs.readFileSync(process.env.GOOGLE_APPLICATION_CREDENTIALS, 'utf8'));
-  log(`✓ authenticated as ${creds.client_email}`);
+  const auth = await getToken();
+  const keyFile = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  const who = keyFile && fs.existsSync(keyFile)
+    ? JSON.parse(fs.readFileSync(keyFile, 'utf8')).client_email
+    : 'your Google account (application default credentials)';
+  log(`✓ authenticated as ${who}`);
   if (!FOLDER_ID) {
     log('! GDRIVE_FOLDER_ID is not set — uploads would land loose in the service account drive');
     return;
   }
   const res = await request(
     `https://www.googleapis.com/drive/v3/files/${FOLDER_ID}?fields=id,name`,
-    { headers: { authorization: `Bearer ${token}` } }
+    { headers: authHeaders(auth) }
   );
   const folder = await res.json();
   log(`✓ folder reachable: "${folder.name}" (${folder.id})`);
@@ -200,6 +269,7 @@ async function recordOnJob(jobId, file, localPath) {
 async function main() {
   const args = process.argv.slice(2);
 
+  if (args.includes('--init')) return initFolder();
   if (args.includes('--check')) return check();
 
   const file = args.find((a) => !a.startsWith('--'));
