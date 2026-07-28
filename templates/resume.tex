@@ -1,79 +1,93 @@
-% Resume template — Charter, single column, ATS-safe.
+% Resume template — Stanford Career Education formatting.
 %
-% Ported from the pattern Dileep's other tooling uses: Charter serif, tight
-% geometry, small-caps section headings with a full-width rule, and an \entry
-% command putting the title flush left and location/dates flush right.
+% Follows Stanford's published guidance rather than the denser Charter pattern
+% this replaced:
+%   - Margins 0.75in (Stanford: minimum 0.70). The previous 0.5in read cramped,
+%     and white space is what lets a recruiter scan.
+%   - Helvetica/Arial at 11pt (Stanford: Calibri or Arial, 11-12pt). Carlito,
+%     the metric-compatible Calibri clone, is not installed here; TeX Gyre
+%     Heros is a Helvetica clone and the closest available match to Arial.
+%   - Left-justified throughout: US recruiters scan left to right.
+%   - Company bolded (Stanford: bold whichever of company or title lands
+%     harder; for this candidate the employers carry more weight).
+%   - Experience before Education.
 %
-% Two deliberate deviations from that pattern:
+% Deliberate deviations, both narrow:
+%   - A thin rule under each section heading. Stanford says avoid lines "unless
+%     they help readability"; a single hairline is the standard scanning aid in
+%     nearly every professional resume and earns its place.
+%   - Up to two pages is allowed by Stanford. generate.js still targets one,
+%     because a one-page resume for two years of professional experience is the
+%     stronger document — but the layout no longer fights to achieve it.
 %
-%   1. enumitem and titlesec are NOT used — neither is installed here
-%      (they live in texlive-latex-extra). The same output is produced with a
-%      plain \list and a hand-rolled heading macro, so this compiles against
-%      texlive-latex-recommended alone.
-%
-%   2. cmap is added, and MUST precede fontenc. MEASURED: without it pdflatex
-%      renders fi/fl as ligature glyphs with no reverse mapping, so "profile"
-%      extracts as "prole" and "workflows" as "workows" — silently corrupting
-%      the exact keywords an ATS matches on. The pdftotext gate in generate.js
-%      fails the build if this regresses.
-%
-% The \entry rows use tabular*. VERIFIED against pdftotext: a one-row tabular
-% for a title/date line extracts cleanly and in reading order. The standard ATS
-% warning about tables concerns tables holding page structure, not this.
-%
-% Other ATS constraints held throughout: single column; contact details in the
-% document body, never a header (parsers skip headers); standard section names;
-% no icons or graphics.
+% ATS constraints that override aesthetics, each measured against pdftotext:
+%   - cmap MUST precede fontenc. Without it pdflatex emits fi/fl as ligature
+%     glyphs with no reverse mapping and "profile" extracts as "prole".
+%   - Headings use \MakeUppercase, never \scshape: small caps renders the first
+%     letter full size and the rest small, and extraction yields "E DUCATION".
+%   - Single column; contact details in the body, never a header; standard
+%     section names; no icons or graphics.
 %
 % Placeholders are substituted by generate.js. Content comes only from
 % master-facts.json — nothing is authored here.
 
-\documentclass[letterpaper,10pt]{article}
+\documentclass[letterpaper,11pt]{article}
 
-\usepackage[left=0.5in,right=0.5in,top=0.45in,bottom=0.45in]{geometry}
+\usepackage[margin=0.75in]{geometry}
 
-\usepackage{cmap}                  % MUST precede fontenc — see note 2 above
+\usepackage{cmap}                  % MUST precede fontenc
 \usepackage[T1]{fontenc}
-\usepackage{charter}               % the professional serif look
 \usepackage[utf8]{inputenc}
+\usepackage{tgheros}               % Helvetica clone ~ Arial
+\renewcommand{\familydefault}{\sfdefault}
 \usepackage{tabularx}
-\usepackage[hidelinks]{hyperref}   % links work but render black, print clean
+\usepackage[hidelinks]{hyperref}
 \input{glyphtounicode}
 \pdfgentounicode=1
 
 \setlength{\parindent}{0pt}
 \pagestyle{empty}
 
-% Section heading: bold UPPERCASE with a full-width rule beneath.
-%
-% The source pattern used \scshape here. MEASURED and rejected: small caps
-% renders the first letter full-size and the rest small, and pdftotext reads
-% the result as "E DUCATION" — a parser looking for "Education" does not match.
-% \MakeUppercase carries the same visual weight and extracts as "EDUCATION".
+% Let long URLs in the contact line break instead of running into the margin.
+% Without this the last link overflowed the right margin by ~0.3in — the ink
+% reached 0.19in from the page edge while every other element stopped correctly.
+\usepackage{url}
+\urlstyle{same}     % URLs in the body font, not typewriter
+\sloppy
+\setlength{\emergencystretch}{3em}
+
+% Section heading: bold uppercase, hairline rule beneath.
 \newcommand{\resumesection}[1]{%
-  \vspace{4pt}%
-  {\normalsize\bfseries\MakeUppercase{#1}}\\[-5.5pt]%
-  \rule{\textwidth}{0.6pt}\\[2pt]%
+  \vspace{9pt}%
+  {\normalsize\bfseries\MakeUppercase{#1}}\\[-4pt]%
+  % \par, not \\: a \\ after the rule leaves an empty line box when the next
+  % thing is a list, so Projects and Skills sat visibly lower than Experience,
+  % where an \entry fills that line. \par ends the paragraph without one.
+  \rule{\textwidth}{0.5pt}\par\vspace{2pt}%
 }
 
-% Title flush left, location/dates flush right, on one line.
+% Title flush left, location/dates flush right.
+%
+% tabularx with an X column, not tabular*: tabular* cannot wrap, so a long left
+% cell (an institution plus a degree plus a GPA) pushed the right-hand dates
+% clean off the page — ink reached the paper edge with zero right margin. X
+% wraps the left cell and keeps the dates inside the text block.
 \newcommand{\entry}[2]{%
-  \begin{tabular*}{\textwidth}{@{}l@{\extracolsep{\fill}}r@{}}
+  \begin{tabularx}{\textwidth}{@{}X@{\hspace{1em}}r@{}}
     #1 & #2 \\
-  \end{tabular*}%
+  \end{tabularx}%
 }
 
-% Tight bullets without enumitem. NOTE: \setlength inside \begin{itemize} is
-% silently ignored — \list resets these as it opens — so they are passed as
-% \list's second argument instead.
+% Bullets. NOTE: \setlength inside \begin{itemize} is silently ignored — \list
+% resets these as it opens — so they are passed as \list's second argument.
 \newenvironment{resumebullets}{%
   \begin{list}{\textbullet}{%
-    \setlength{\leftmargin}{1.35em}%
+    \setlength{\leftmargin}{1.2em}%
     \setlength{\labelsep}{0.5em}%
-    \setlength{\labelwidth}{0.85em}%
-    \setlength{\itemsep}{1pt}%
+    \setlength{\labelwidth}{0.7em}%
+    \setlength{\itemsep}{2pt}%
     \setlength{\parsep}{0pt}%
-    \setlength{\topsep}{1pt}%
+    \setlength{\topsep}{4pt}%
     \setlength{\partopsep}{0pt}%
     \setlength{\rightmargin}{0pt}%
   }%
@@ -82,9 +96,9 @@
 \begin{document}
 
 %% NAME %%
-{\LARGE\bfseries __NAME__}\\[2pt]
+{\LARGE\bfseries __NAME__}\\[4pt]
 %% CONTACT — body text, never a header: parsers skip headers %%
-__CONTACT__\\[1pt]
+__CONTACT__\\[2pt]
 
 __SUMMARY__
 

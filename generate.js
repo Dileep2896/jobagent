@@ -266,9 +266,13 @@ function renderContact(contact) {
   const bits = [contact.location, contact.email, contact.phone].filter(Boolean).map(tex);
   const links = [];
   const l = contact.links || {};
-  if (l.linkedin) links.push(`\\href{${l.linkedin}}{${tex(l.linkedin.replace(/^https?:\/\/(www\.)?/, ''))}}`);
-  if (l.github) links.push(`\\href{${l.github}}{${tex(l.github.replace(/^https?:\/\/(www\.)?/, ''))}}`);
-  if (l.website) links.push(`\\href{${l.website}}{${tex(l.website.replace(/^https?:\/\/(www\.)?/, ''))}}`);
+  // \\href makes an unbreakable box: a long URL at the end of the contact line
+  // overflowed the right margin instead of wrapping. \\nolinkurl inside allows
+  // breaks at the URL's own punctuation.
+  const link = (u) => `\\href{${u}}{\\nolinkurl{${u.replace(/^https?:\/\/(www\.)?/, '')}}}`;
+  if (l.linkedin) links.push(link(l.linkedin));
+  if (l.github) links.push(link(l.github));
+  if (l.website) links.push(link(l.website));
   return [...bits, ...links].join(' \\textbar{} ');
 }
 
@@ -333,11 +337,9 @@ function renderEducation(education) {
   // whole experience bullet, which is worth far more on a one-page resume.
   const out = ['\\resumesection{Education}'];
   for (const e of education) {
-    const gpa = e.gpa ? ` (GPA ${tex(e.gpa)})` : '';
-    out.push(
-      `\\entry{\\textbf{${tex(e.institution)}} --- ${tex(e.credential)}${gpa}}` +
-      `{${tex(e.location || '')} \\textbar{} ${tex(e.start)} -- ${tex(e.end)}}`
-    );
+    const right = [e.gpa ? `GPA ${tex(e.gpa)}` : '', `${tex(e.start)} -- ${tex(e.end)}`]
+      .filter(Boolean).join(' \\textbar{} ');
+    out.push(`\\entry{\\textbf{${tex(e.institution)}} --- ${tex(e.credential)}}{${right}}`);
   }
   return out.join('\n');
 }
@@ -410,7 +412,7 @@ function renderMarkdown(facts, job, sel) {
 
 // US Letter, in PostScript points, and the template's 0.45in vertical margins.
 const PAGE_H = 792;
-const MARGIN_PT = 0.45 * 72;
+const MARGIN_PT = 0.75 * 72;
 const MIN_FILL = 0.82; // below this the page reads as padded-out and thin
 
 /**
