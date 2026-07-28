@@ -49,7 +49,7 @@ const SUBMIT_LIKE = /submit|apply now|send application|finish/i;
 
 // Ordered: first match wins, so "linkedin" is tested before generic "url".
 const FIELD_MAP = [
-  { re: /(^|\W)(full[\s_-]*name|your[\s_-]*name|^name$)/i, get: (f) => f.contact.name },
+  { re: /(^|\W)(full[\s_-]*name|legal[\s_-]*name|your[\s_-]*name|^name\*?$)/i, get: (f) => f.contact.name },
   { re: /first[\s_-]*name/i, get: (f) => f.contact.name.split(' ')[0] },
   { re: /last[\s_-]*name|surname|family[\s_-]*name/i, get: (f) => f.contact.name.split(' ').slice(-1)[0] },
   { re: /e[-\s_]*mail/i, get: (f) => f.contact.email },
@@ -57,7 +57,9 @@ const FIELD_MAP = [
   { re: /linkedin/i, get: (f) => (f.contact.links || {}).linkedin },
   { re: /github/i, get: (f) => (f.contact.links || {}).github },
   { re: /portfolio|personal (site|website)|website|your site/i, get: (f) => (f.contact.links || {}).website },
-  { re: /location|city|where are you based|current residence/i, get: (f) => f.contact.location },
+  // \b matters: without it this matches "reLOCATION", and a yes/no relocation
+  // question gets filled with a city name.
+  { re: /\b(location|city|based in|current residence)\b/i, get: (f) => f.contact.location },
 ];
 
 /** Screening answers are matched loosely against the question text. */
@@ -73,17 +75,21 @@ function valueFor(facts, label, name) {
   const hay = `${label} ${name}`.trim();
   if (!hay || NEVER_FILL.test(hay)) return null;
 
+  // Screening questions are checked FIRST. They are legal attestations and
+  // their wording overlaps contact fields ("open to relocation" vs "location"),
+  // so a contact-shaped match must never win over an attestation. If one
+  // matches with no pre-written answer, return a marker so the caller reports
+  // it rather than falling through and filling something wrong.
+  for (const m of SCREENING_MAP) {
+    if (m.re.test(hay)) {
+      const v = (facts.screening_answers || {})[m.key];
+      return v ? { value: v, source: `screening_answers.${m.key}` } : { needsHuman: m.key };
+    }
+  }
   for (const m of FIELD_MAP) {
     if (m.re.test(hay)) {
       const v = m.get(facts);
       return v ? { value: v, source: 'contact' } : null;
-    }
-  }
-  for (const m of SCREENING_MAP) {
-    if (m.re.test(hay)) {
-      const v = (facts.screening_answers || {})[m.key];
-      // Blank means the human has not answered it. Reported, never guessed.
-      return v ? { value: v, source: `screening_answers.${m.key}` } : null;
     }
   }
   return null;
@@ -98,7 +104,8 @@ async function main() {
 
   const facts = JSON.parse(fs.readFileSync(FACTS_PATH, 'utf8'));
   const { rows } = await pool.query(
-    `SELECT j.id, j.title, j.url, j.resume_path, c.name AS company, c.board
+    `SELECT j.id, j.title, j.url, j.external_id, j.resume_path,
+            c.name AS company, c.board, c.board_token
        FROM jobs j JOIN companies c ON c.id = j.company_id WHERE j.id = $1`,
     [jobId]
   );
@@ -106,9 +113,18 @@ async function main() {
   const job = rows[0];
   if (!job.url) throw new Error(`job ${jobId} has no url`);
 
-  // Lever and Greenhouse serve the form at a /apply path; visiting the posting
-  // alone would leave nothing to fill.
-  const applyUrl = job.board === 'lever' && !/\/apply\/?$/.test(job.url) ? `${job.url}/apply` : job.url;
+  // Each board serves its form at a different place, and the stored URL is not
+  // always it: Stripe's Greenhouse links redirect to their own careers site,
+  // which has no form at all, so Greenhouse is rebuilt from the board token and
+  // external id instead of trusting job.url.
+  const applyUrl = (() => {
+    if (job.board === 'lever') return /\/apply\/?$/.test(job.url) ? job.url : `${job.url}/apply`;
+    if (job.board === 'ashby') return /\/application\/?$/.test(job.url) ? job.url : `${job.url}/application`;
+    if (job.board === 'greenhouse' && job.board_token && job.external_id) {
+      return `https://job-boards.greenhouse.io/${job.board_token}/jobs/${job.external_id}`;
+    }
+    return job.url;
+  })();
 
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const browser = await chromium.launch({ headless: !headed });
@@ -170,15 +186,50 @@ async function main() {
     // that lands gets silently overwritten. The screenshot from the first run
     // showed "Current location" reported as filled but actually empty for
     // exactly this reason.
+    // Ashby and Greenhouse both render MULTIPLE file inputs — Resume and Cover
+    // Letter. Uploading to all of them would attach the resume as the cover
+    // letter, which looks careless to a reviewer and is hard to spot. Identify
+    // the resume slot from its surrounding text; anything that looks like a
+    // cover letter is left alone.
+    // Ashby and Greenhouse both render MULTIPLE file inputs — typically an
+    // unlabelled one, a Resume slot, and a Cover Letter slot. A running
+    // "attach to the first thing that looks plausible" rule attaches twice.
+    // Decide in two passes: prefer a slot explicitly labelled resume/CV, and
+    // only fall back to an unlabelled slot if no explicit one exists. A cover
+    // letter slot is never filled with a resume.
     const fileInputs = await page.$$('input[type=file]');
+    const described = [];
     for (const el of fileInputs) {
-      if (job.resume_path && fs.existsSync(job.resume_path)) {
-        await el.setInputFiles(job.resume_path);
-        filled.push(`resume <- ${path.basename(job.resume_path)}`);
-      } else {
+      const ctx = await el.evaluate((e) => {
+        const own = ((e.labels && e.labels[0] && e.labels[0].innerText) || e.getAttribute('aria-label') || '').trim();
+        let n = e.parentElement, up = '';
+        for (let i = 0; i < 4 && n; i++, n = n.parentElement) {
+          const t = (n.innerText || '').trim();
+          if (t.length > 3 && t.length < 300) { up = t; break; }
+        }
+        return `${own} ${up}`.toLowerCase();
+      });
+      described.push({ el, ctx });
+    }
+
+    const isCover = (c) => /cover\s*letter/.test(c);
+    const isResume = (c) => /resume|\bcv\b/.test(c) && !isCover(c);
+
+    let target = described.find((d) => isResume(d.ctx)) || described.find((d) => !isCover(d.ctx));
+
+    if (fileInputs.length) {
+      if (!job.resume_path || !fs.existsSync(job.resume_path)) {
         unanswered.push('resume (none built — run generate.js first)');
+        target = null;
+      } else if (target) {
+        await target.el.setInputFiles(job.resume_path);
+        filled.push(`resume <- ${path.basename(job.resume_path)}`);
+      }
+      for (const d of described) {
+        if (d !== target && isCover(d.ctx)) skipped.push('cover letter upload (not auto-attached)');
       }
     }
+
     if (fileInputs.length) {
       await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(3000); // parser repaints after the request lands
@@ -229,7 +280,11 @@ async function main() {
         continue;
       }
 
-      const hit = valueFor(facts, info.label, info.name);
+      const hit = valueFor(facts, info.label, `${info.name} ${info.groupText || ''}`);
+      if (hit && hit.needsHuman) {
+        unanswered.push(`${tag} (attestation, no answer in screening_answers.${hit.needsHuman})`);
+        continue;
+      }
       if (!hit) {
         if (info.required) unanswered.push(`${tag} (required, no pre-written answer)`);
         else skipped.push(tag);
@@ -237,8 +292,16 @@ async function main() {
       }
 
       try {
-        if (info.tag === 'select') await el.selectOption({ label: hit.value }).catch(() => {});
-        else await el.fill(String(hit.value));
+        if (info.tag === 'select') {
+          // Free-text answers rarely match a dropdown option verbatim. Silently
+          // swallowing the failure previously reported the field as filled when
+          // it was still empty.
+          let ok = true;
+          await el.selectOption({ label: String(hit.value) }).catch(() => { ok = false; });
+          if (!ok) { unanswered.push(`${tag} (dropdown — pick the option yourself)`); continue; }
+        } else {
+          await el.fill(String(hit.value));
+        }
         filled.push(`${tag} <- ${hit.source}`);
       } catch {
         unanswered.push(`${tag} (could not fill)`);
