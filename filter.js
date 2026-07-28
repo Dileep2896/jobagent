@@ -538,6 +538,37 @@ function parseVerdict(message) {
   return parsed;
 }
 
+// ---------------------------------------------------------------------------
+// Token accounting.
+//
+// The point of a --limit 5 trial is to learn the per-job cost before committing
+// to 734 of them, and that is unanswerable without reading usage off the
+// response. Counted here rather than estimated from JD length: JDs vary by an
+// order of magnitude and the system prompt is a fixed ~860 tokens on top.
+// ---------------------------------------------------------------------------
+const usage = { calls: 0, input: 0, output: 0 };
+
+function recordUsage(u, jobId) {
+  if (!u) return;
+  usage.calls += 1;
+  usage.input += u.input_tokens || 0;
+  usage.output += u.output_tokens || 0;
+  // Detail for the first few only: informative on a trial run, silent on a
+  // full backlog run where 734 of these would bury the verdicts.
+  if (usage.calls <= 5) {
+    log(`job ${jobId}: ${u.input_tokens || 0} in / ${u.output_tokens || 0} out tokens`);
+  }
+}
+
+function logUsageSummary() {
+  if (!usage.calls) {
+    log('token usage: no API calls made');
+    return;
+  }
+  log(`token usage: ${usage.calls} call(s), ${usage.input} input + ${usage.output} output tokens ` +
+      `(avg ${Math.round(usage.input / usage.calls)} in / ${Math.round(usage.output / usage.calls)} out per job)`);
+}
+
 /** The request body, identical whether sent one at a time or in a batch. */
 function buildRequestParams(job) {
   return {
@@ -571,6 +602,7 @@ async function classify(job) {
       // this system prompt is nowhere near that, so a breakpoint would be a
       // silent no-op.
       const message = await anthropic.messages.create(buildRequestParams(job));
+      recordUsage(message.usage, job.id);
 
       return parseVerdict(message);
     } catch (err) {
@@ -742,6 +774,7 @@ async function harvestBatch(batchId, counts) {
         err.transient = true;
         throw err;
       }
+      recordUsage(r.message.usage, job.id);
       const status = await commitVerdict(job, parseVerdict(r.message));
       counts[status] = (counts[status] || 0) + 1;
     } catch (err) {
@@ -946,6 +979,7 @@ async function main() {
   }
 
   log('run summary:', JSON.stringify(totals));
+  logUsageSummary();
 }
 
 function onSignal(sig) {
