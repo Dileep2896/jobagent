@@ -1,0 +1,102 @@
+{
+  "_README": [
+    "TEMPLATE — copy to master-facts.json and replace everything with YOUR real history.",
+    "Every bullet in a generated resume must cite an id from `facts`. A generated",
+    "bullet with no source id is a bug (CLAUDE.md hard rule), so this file is the",
+    "single source of truth for anything that can appear on a resume.",
+    "All content below is placeholder and must not be used in a real application.",
+    "Validate with: node validate-facts.js"
+  ],
+
+  "schema_version": 1,
+
+  "contact": {
+    "name": "EXAMPLE Jane Doe",
+    "email": "jane@example.com",
+    "phone": "+1 555 010 0000",
+    "location": "Boston, MA",
+    "links": {
+      "github": "https://github.com/example",
+      "linkedin": "https://www.linkedin.com/in/example",
+      "website": ""
+    }
+  },
+
+  "roles": [
+    {
+      "id": "role-acme",
+      "company": "EXAMPLE Acme Corp",
+      "title": "Senior Software Engineer",
+      "location": "Remote, US",
+      "start": "2022-03",
+      "end": "present"
+    },
+    {
+      "id": "role-initech",
+      "company": "EXAMPLE Initech",
+      "title": "Software Engineer",
+      "location": "Boston, MA",
+      "start": "2019-06",
+      "end": "2022-02"
+    }
+  ],
+
+  "education": [
+    {
+      "id": "edu-msc",
+      "institution": "EXAMPLE State University",
+      "credential": "M.S. Computer Science",
+      "location": "Boston, MA",
+      "start": "2017-09",
+      "end": "2019-05"
+    }
+  ],
+
+  "facts": [
+    {
+      "id": "acme-latency",
+      "role_id": "role-acme",
+      "text": "Cut p99 checkout latency 320ms to 90ms by replacing N+1 ORM reads with a batched Postgres query and a Redis read-through cache.",
+      "skills": ["postgres", "redis", "node.js", "performance"],
+      "metric": "p99 320ms -> 90ms",
+      "verified": true
+    },
+    {
+      "id": "acme-oncall",
+      "role_id": "role-acme",
+      "text": "Reduced paging volume 60% across a 12-service estate by adding SLO-based alerting and deleting 40 threshold alerts that never actioned.",
+      "skills": ["observability", "sre", "prometheus"],
+      "metric": "pages down 60%",
+      "verified": true
+    },
+    {
+      "id": "initech-migration",
+      "role_id": "role-initech",
+      "text": "Migrated a 400k-line Python 2 monolith to Python 3 incrementally behind feature flags with zero customer-visible downtime.",
+      "skills": ["python", "migration", "feature-flags"],
+      "metric": "zero downtime",
+      "verified": true
+    }
+  ],
+
+  "skills": {
+    "languages": ["TypeScript", "Python", "SQL"],
+    "infrastructure": ["AWS", "Postgres", "Docker"],
+    "practices": ["Distributed systems", "Observability", "CI/CD"]
+  },
+
+  "screening_answers": {
+    "_README": [
+      "Answers to ATS screening questions. These are legal attestations to an",
+      "employer, so they are YOURS to write and the model must never invent or",
+      "alter them (CLAUDE.md hard rule). The submit stage reuses these verbatim",
+      "and pauses for anything not listed here."
+    ],
+    "work_authorization_us": "",
+    "requires_sponsorship_now_or_future": "",
+    "willing_to_relocate": "",
+    "desired_salary": "",
+    "notice_period": "",
+    "years_of_experience": ""
+  }
+}

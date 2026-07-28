@@ -13,13 +13,38 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 3. generate     - build a tailored resume from master-facts.json
 4. critique     - score against the JD, revise, hard cap 2 revisions
 5. review queue - human approves, then Playwright prefills the form
+6. submit       - only after approval; reuses screening_answers verbatim and
+                  pauses on any question not already answered by the human
+7. upload       - resume PDF to Google Drive, so anything the agent cannot
+                  submit can be applied to manually
+
+## Architecture decisions (2026-07-28)
+- Agents are Node pipeline stages, like discover.js/filter.js: one status per
+  job, resumable, cron-scheduled. Not Claude Code subagents (they don't run
+  unattended) and not Managed Agents (too big a shift from local Postgres).
+- Filter stays on Haiku 4.5. Local Hermes was considered and rejected: this
+  box is a 4-core Skylake i5 with no usable GPU compute, so an 8B model runs
+  ~2-3 min/job — roughly 35 hours for the current 733-job backlog, versus
+  ~$1-2 and minutes via the API. Revisit only if privacy forces it.
+- Resume PDFs are built from .tex. ATS constraints are non-negotiable and
+  mechanically checkable: single column, no tables for layout, no headers or
+  footers holding contact info, standard section headers, contact details in
+  the document body. The gate is a round trip — compile, run pdftotext, and
+  assert the sections, contact info and every cited fact-id survive.
 
 ## Hard rules
 - Never invent resume content. Every bullet must map to an id in
   master-facts.json. A generated bullet with no source id is a bug.
-- Never auto-submit an application. Stage 5 stops at "ready_for_review".
-  Screening questions (work authorization, sponsorship, salary) are
-  answered by the human, never the model.
+- Never submit without explicit human approval. The pipeline may prepare and
+  prefill everything, but it stops at "ready_for_review" and notifies. Only
+  after the human approves does Playwright submit. (Agreed 2026-07-28,
+  replacing the previous never-submit-at-all rule; the approval gate itself
+  is not negotiable.)
+- Screening questions (work authorization, sponsorship, salary) are legal
+  attestations to an employer. They are answered by the human once, in
+  master-facts.json `screening_answers`, and reused verbatim. The model never
+  invents, alters, or infers them. Any question not pre-answered pauses that
+  application for human input rather than being guessed.
 - Critique loop needs deterministic gates alongside the LLM score:
   JD keyword coverage, page count, fact-id validation. LLM-score-only
   loops converge on keyword stuffing.
