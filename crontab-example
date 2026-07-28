@@ -1,0 +1,19 @@
+# jobagent — install with:  crontab crontab-example
+# Verify with:              crontab -l
+# Remove with:              crontab -r
+#
+# Cron is used rather than a systemd --user timer because linger is disabled on
+# this box: user services would stop at logout. Cron runs regardless.
+# A systemd timer is nicer (proper logging, restart policy) but needs
+#   sudo loginctl enable-linger dileep
+# or a system-level unit.
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# Full pass twice a day. run-daily.sh takes a lock, so an overrun is harmless.
+0 7,19 * * *  ./run-daily.sh >/dev/null 2>&1
+
+# Discovery-only pass at midday to catch new postings without spending on the
+# filter. Swap to a full pass once you are happy with the scoring.
+0 13 * * *    cd /home/dileep/jobagent && ./run-daily.sh --no-filter >/dev/null 2>&1
