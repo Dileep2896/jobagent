@@ -103,8 +103,12 @@ function scoreFact(fact, jdTokens) {
 
   // A quantified bullet is stronger evidence; small nudge, not a thumb on the scale.
   const hasMetric = fact.metric ? 0.5 : 0;
+  // A won competition is independent third-party evidence and outranks keyword
+  // overlap. Without this, a 1st-place project lost its slot to a topically
+  // closer but unremarkable one.
+  const award = /\b(1st|first|winner|won|grand prize)\b/i.test(`${fact.metric || ''} ${fact.context || ''}`) ? 4 : 0;
 
-  return skillHits * 3 + Math.min(textHits, 8) * 0.25 + hasMetric;
+  return skillHits * 3 + Math.min(textHits, 8) * 0.25 + hasMetric + award;
 }
 
 function selectContent(facts, jd, bulletBudget, projectCap, roleCap) {
@@ -119,26 +123,61 @@ function selectContent(facts, jd, bulletBudget, projectCap, roleCap) {
   // Rank roles by their best-matching content, but always keep the most recent
   // role — a resume that omits the current job reads as a gap.
   const byRole = new Map();
-  for (const f of usable) {
+  usable.forEach((f, order) => {
     if (!byRole.has(f.role_id)) byRole.set(f.role_id, []);
-    byRole.get(f.role_id).push({ fact: f, score: scoreFact(f, jdTokens) });
-  }
+    byRole.get(f.role_id).push({ fact: f, order, score: scoreFact(f, jdTokens) });
+  });
   for (const list of byRole.values()) list.sort((a, b) => b.score - a.score);
+
+  // Seniority and tenure, not just keyword overlap.
+  //
+  // Summing bullet scores let one lucky keyword decide a whole role: a
+  // four-month 2021 internship outranked a founder role because a single
+  // bullet mentioned Elasticsearch. A resume reader weighs what the role WAS,
+  // not only how its words align with this posting.
+  const months = (r) => {
+    const end = r.end === 'present' ? new Date().toISOString().slice(0, 7) : r.end;
+    const [ys, ms] = String(r.start).split('-').map(Number);
+    const [ye, me] = String(end).split('-').map(Number);
+    return Number.isFinite(ys) && Number.isFinite(ye) ? Math.max(0, (ye - ys) * 12 + (me - ms)) : 0;
+  };
+  const seniority = (title) => {
+    const t = String(title || '').toLowerCase();
+    if (/founder|founding|principal|staff|lead|head of/.test(t)) return 2.5;
+    if (/senior|sr\.?\b/.test(t)) return 1.5;
+    if (/intern\b|internship/.test(t)) return -2;
+    return 0;
+  };
 
   const roleScores = roles.map((r) => {
     const list = byRole.get(r.id) || [];
-    const top = list.slice(0, MAX_BULLETS_PER_ROLE);
+    // Relevance decides WHICH bullets survive; master-facts.json order decides
+    // how they READ. Sorting the survivors by score put "Tripled feature
+    // velocity" above "Built the entire product from zero to production" —
+    // burying the strongest claim because it matched fewer JD keywords.
+    const top = list.slice(0, MAX_BULLETS_PER_ROLE).sort((a, b) => a.order - b.order);
     return {
       role: r,
       bullets: top,
-      score: top.reduce((n, x) => n + x.score, 0),
+      score:
+        top.reduce((n, x) => n + x.score, 0) +
+        seniority(r.title) +
+        Math.min(months(r), 24) * 0.08,
       isCurrent: r.end === 'present',
     };
   });
 
+  // Always keep the current role and the most recent finished one, then fill
+  // the remaining slots by relevance. Purely score-based selection kept a 2021
+  // internship while dropping a 2024-2026 role — chronologically odd, and it
+  // loses the most recent evidence of what the candidate can do now.
   const current = roleScores.filter((r) => r.isCurrent);
-  const rest = roleScores.filter((r) => !r.isCurrent).sort((a, b) => b.score - a.score);
-  const chosenRoles = [...current, ...rest].slice(0, roleLimit);
+  const finished = roleScores
+    .filter((r) => !r.isCurrent)
+    .sort((a, b) => String(b.role.end).localeCompare(String(a.role.end)));
+  const mostRecent = finished.slice(0, 1);
+  const remainder = finished.slice(1).sort((a, b) => b.score - a.score);
+  const chosenRoles = [...current, ...mostRecent, ...remainder].slice(0, roleLimit);
 
   // Preserve reverse-chronological order for the reader; selection is by
   // relevance, presentation is by date.
@@ -147,7 +186,9 @@ function selectContent(facts, jd, bulletBudget, projectCap, roleCap) {
   // Trim to a total bullet budget so one page stays achievable.
   let budget = totalBullets;
   for (const r of chosenRoles) {
-    r.bullets = r.bullets.slice(0, Math.max(1, Math.min(r.bullets.length, budget)));
+    // Trim from the weakest end, then restore authored order.
+    const keep = Math.max(1, Math.min(r.bullets.length, budget));
+    r.bullets = [...r.bullets].sort((a, b) => b.score - a.score).slice(0, keep).sort((a, b) => a.order - b.order);
     budget -= r.bullets.length;
   }
 
@@ -254,12 +295,28 @@ function renderSummary(facts, job, selection) {
   // padding at best and inaccuracy at worst.
   const top = (facts.roles || [])[0];
   if (!top) return '';
-  const shown = selection.roles.length;
-  return (
-    `\\resumesection{Summary}\n` +
-    `${tex(top.title)} at ${tex(top.company)}, applying for ${tex(job.title || 'this role')} ` +
-    `at ${tex(job.company)}. ${shown} role${shown === 1 ? '' : 's'} across full-stack, mobile, and AI engineering.`
-  );
+
+  // Assembled from facts, never authored. The previous version told the reader
+  // which job they were reading an application for — which they know — and
+  // padded with a role count. Credentials they cannot infer from the bullets
+  // are worth the three lines instead.
+  const edu = (facts.education || [])[0];
+  const bits = [`${tex(top.title)} at ${tex(top.company)}`];
+  if (edu) bits.push(`${tex(edu.credential)}, ${tex(edu.institution)}`);
+
+  const credentials = [];
+  const nPat = (facts.patents || []).length;
+  const nPub = (facts.publications || []).length;
+  if (nPat) credentials.push(`${nPat} granted patent${nPat === 1 ? '' : 's'}`);
+  if (nPub) credentials.push(`${nPub} peer-reviewed publication${nPub === 1 ? '' : 's'}`);
+  const award = (facts.awards || []).find((a) => /1st place/i.test(a.title || ''));
+  if (award) credentials.push(tex(award.title.replace(/\s*\(.*$/, '')));
+
+  // Company and credential names often already end in a period ("Metis AI
+  // Inc."), which produced "Inc..". Join without doubling terminal punctuation.
+  const sentence = bits.map((b) => b.replace(/\.$/, '')).join('. ');
+  return `\\resumesection{Summary}\n${sentence}.` +
+         (credentials.length ? ` ${credentials.join('; ')}.` : '');
 }
 
 // ---------------------------------------------------------------------------
@@ -407,10 +464,14 @@ async function main() {
       throw new Error(`ATS gates failed (PDF rejected):\n  - ${result.failures.join('\n  - ')}`);
     }
 
-    // Shrink in order of least value lost: a project, then bullets, then the
-    // oldest role entirely.
-    if (projectCap > 1) projectCap -= 1;
-    else if (bullets > MIN_TOTAL_BULLETS) bullets -= 2;
+    // Order matters and my first guess was wrong. Cutting projects first threw
+    // away an award-winning project while keeping a fourth marginal bullet.
+    // Trim bullets first (the weakest is genuinely the cheapest loss), then
+    // projects, and only then drop a whole role.
+    if (bullets > MIN_TOTAL_BULLETS) bullets -= 1;
+    else if (projectCap > 2) projectCap -= 1;
+    else if (roleCap > 3) roleCap -= 1;
+    else if (projectCap > 1) projectCap -= 1;
     else if (roleCap > 2) roleCap -= 1;
     else throw new Error(`cannot fit one page even at minimum content (${result.pages} pages)`);
 
