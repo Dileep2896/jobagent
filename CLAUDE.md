@@ -173,15 +173,24 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   is unattended operation on a box that drops wifi.
 
 ## Next
-1. Set CANDIDATE_PROFILE in filter.js from master-facts.json — it is still the
-   placeholder, and every one of the 733 verdicts depends on it.
-2. Configure Anthropic credentials on this box.
-3. `node filter.js --once --limit 5` to sanity-check verdicts and per-job cost
+1. `node filter.js --once --limit 5` to sanity-check verdicts and per-job cost
    before running the full 733-job backlog. This is the only thing standing
    between generate.js and a live end-to-end run: nothing is shortlisted yet,
-   so stage 3 has no queue to consume.
-4. Expand the watchlist beyond the 3 seed companies.
-5. Add generate.js to crontab-example, after filter.js.
+   so stage 3 has no queue to consume. NOT YET RUN — needs an explicit yes per
+   the hard rule.
+2. Expand the watchlist beyond the 3 seed companies.
+3. Add generate.js to crontab-example, after filter.js.
+
+DONE, previously listed here:
+- CANDIDATE_PROFILE is gone; loadProfile() in filter.js derives the profile from
+  master-facts.json at startup, so the facts are the single source. Verified it
+  renders fully: 5 archetypes, seniority, locations, 3 recent roles, 8 skill
+  groups, 5 hard blockers.
+- Anthropic credentials configured (2026-07-28). The key lives in .env, NOT in
+  ~/.bashrc: Ubuntu's .bashrc returns early for non-interactive shells, so an
+  export there is invisible to cron and run-daily.sh would skip the filter stage
+  every night while looking healthy. run-daily.sh already sources .env with
+  `set -a`. .env is mode 600 and gitignored; ~/.bashrc is 644.
 
 ## Job status vocabulary (exact strings, do not invent new ones)
 new              - discovered, not yet filtered
