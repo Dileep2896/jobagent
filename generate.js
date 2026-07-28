@@ -65,6 +65,48 @@ function tex(s) {
     .replace(/…/g, '...');
 }
 
+/**
+ * Bold the quantified outcome so a skimming reader's eye lands on it.
+ * Applied AFTER tex(): the escaper has already turned % into \\%, so this
+ * matches the escaped form and must not re-escape anything.
+ */
+function boldMetrics(escaped) {
+  // Requires a unit: percent, currency, K/M, an x multiplier, or a trailing +.
+  // An earlier version bolded every digit, so "6-member team" and "3 charging
+  // providers" came out emphasised alongside the real metrics — which drowns
+  // the numbers that matter.
+  return escaped
+    .replace(/(\\\$\d[\d,.]*\s*[KM]?\b)/g, '\\textbf{$1}')
+    .replace(/(\d[\d,.]*\s*\\%)/g, '\\textbf{$1}')
+    .replace(/(\b\d[\d,.]*\+)/g, '\\textbf{$1}')
+    .replace(/(\b\d[\d,.]*x\b)/gi, '\\textbf{$1}');
+}
+
+/**
+ * Present a skill the way it is written in the industry. The facts file stores
+ * skills lowercased for matching; rendering them raw produced "python, fastapi,
+ * neo4j" in the project stacks, which reads as sloppy on a resume.
+ */
+const SKILL_CASE = {
+  'react native': 'React Native', 'node.js': 'Node.js', 'next.js': 'Next.js',
+  'fastapi': 'FastAPI', 'postgresql': 'PostgreSQL', 'postgis': 'PostGIS',
+  'javascript': 'JavaScript', 'typescript': 'TypeScript', 'graphql': 'GraphQL',
+  'neo4j': 'Neo4j', 'chromadb': 'ChromaDB', 'mongodb': 'MongoDB', 'sqlite': 'SQLite',
+  'aws': 'AWS', 'gcp': 'GCP', 'ml': 'ML', 'llm': 'LLM', 'ai agents': 'AI agents',
+  'vertex ai': 'Vertex AI', 'gemini live api': 'Gemini Live API', 'google adk': 'Google ADK',
+  'claude sonnet': 'Claude Sonnet', 'langchain': 'LangChain', 'executorch': 'ExecuTorch',
+  'whisper.cpp': 'Whisper.cpp', 'jetpack compose': 'Jetpack Compose', 'bloc': 'BLoC',
+  'websockets': 'WebSockets', 'rest': 'REST', 'mcp': 'MCP', 'dqn': 'DQN', 'ns-3': 'ns-3',
+  'c#': 'C#', 'c++': 'C++', 'sql': 'SQL', 'vr': 'VR', 'ux': 'UX', 'ui': 'UI',
+  'cloud run': 'Cloud Run', 'firestore': 'Firestore', 'auth0': 'Auth0', 'azure': 'Azure',
+  'tensorflow': 'TensorFlow', 'keras': 'Keras', 'tflite': 'TFLite', 'unity': 'Unity',
+};
+function skillCase(s) {
+  const k = String(s).toLowerCase().trim();
+  if (SKILL_CASE[k]) return SKILL_CASE[k];
+  return k.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
 // ---------------------------------------------------------------------------
 // Relevance scoring — deterministic, explainable, no model.
 // ---------------------------------------------------------------------------
@@ -235,10 +277,12 @@ function renderExperience(roles) {
   const out = ['\\resumesection{Experience}'];
   for (const r of roles) {
     const dates = `${tex(r.role.start)} -- ${tex(r.role.end === 'present' ? 'Present' : r.role.end)}`;
-    out.push(`\\resumerole{${tex(r.role.title)}}{${tex(r.role.company)}}{${dates}}{${tex(r.role.location || '')}}`);
+    const right = [tex(r.role.location || ''), dates].filter(Boolean).join(' \\textbar{} ');
+    out.push(`\\entry{\\textbf{${tex(r.role.company)}} --- ${tex(r.role.title)}}{${right}}`);
     out.push('\\begin{resumebullets}');
-    for (const b of r.bullets) out.push(`  \\item ${tex(b.fact.text)}`);
+    for (const b of r.bullets) out.push(`  \\item ${boldMetrics(tex(b.fact.text))}`);
     out.push('\\end{resumebullets}');
+    out.push('\\vspace{2pt}');
   }
   return out.join('\n');
 }
@@ -248,7 +292,11 @@ function renderProjects(projects) {
   const out = ['\\resumesection{Projects}', '\\begin{resumebullets}'];
   for (const p of projects) {
     const ctx = p.project.context ? ` (${tex(p.project.context)})` : '';
-    out.push(`  \\item {\\bfseries ${tex(p.project.name)}}${ctx}: ${tex(p.project.text)}`);
+    const stack = (p.project.skills || []).slice(0, 7).map(skillCase).join(', ');
+    out.push(
+      `  \\item \\textbf{${tex(p.project.name)}}${ctx}: ${boldMetrics(tex(p.project.text))}` +
+      (stack ? ` \\textit{${tex(stack)}}` : '')
+    );
   }
   out.push('\\end{resumebullets}');
   return out.join('\n');
@@ -281,8 +329,8 @@ function renderEducation(education) {
   for (const e of education) {
     const gpa = e.gpa ? ` (GPA ${tex(e.gpa)})` : '';
     out.push(
-      `{\\bfseries ${tex(e.credential)}} \\textbar{} ${tex(e.institution)}${gpa} ` +
-      `\\hfill ${tex(e.start)} -- ${tex(e.end)}\\\\[1pt]`
+      `\\entry{\\textbf{${tex(e.institution)}} --- ${tex(e.credential)}${gpa}}` +
+      `{${tex(e.location || '')} \\textbar{} ${tex(e.start)} -- ${tex(e.end)}}`
     );
   }
   return out.join('\n');

@@ -1,73 +1,79 @@
-% ATS-safe resume template.
+% Resume template — Charter, single column, ATS-safe.
 %
-% Every formatting choice here is constrained by how applicant tracking systems
-% parse PDFs (verified against the 2026 guidance and enforced by the pdftotext
-% gate in generate.js):
-%   - Single column. Multi-column layouts interleave when text is extracted.
-%   - No tables, tabular, or minipage for layout. Tables are the single largest
-%     cause of parse failures.
-%   - No header/footer. Contact details in the document body or a parser may
-%     never see them.
-%   - Standard section names (Experience, Education, Skills, Projects).
-%   - No icons or graphics. fontawesome renders as glyphs that extract as junk.
-%   - Only geometry + hyperref, both in texlive-latex-recommended, so this
-%     compiles without texlive-latex-extra.
+% Ported from the pattern Dileep's other tooling uses: Charter serif, tight
+% geometry, small-caps section headings with a full-width rule, and an \entry
+% command putting the title flush left and location/dates flush right.
+%
+% Two deliberate deviations from that pattern:
+%
+%   1. enumitem and titlesec are NOT used — neither is installed here
+%      (they live in texlive-latex-extra). The same output is produced with a
+%      plain \list and a hand-rolled heading macro, so this compiles against
+%      texlive-latex-recommended alone.
+%
+%   2. cmap is added, and MUST precede fontenc. MEASURED: without it pdflatex
+%      renders fi/fl as ligature glyphs with no reverse mapping, so "profile"
+%      extracts as "prole" and "workflows" as "workows" — silently corrupting
+%      the exact keywords an ATS matches on. The pdftotext gate in generate.js
+%      fails the build if this regresses.
+%
+% The \entry rows use tabular*. VERIFIED against pdftotext: a one-row tabular
+% for a title/date line extracts cleanly and in reading order. The standard ATS
+% warning about tables concerns tables holding page structure, not this.
+%
+% Other ATS constraints held throughout: single column; contact details in the
+% document body, never a header (parsers skip headers); standard section names;
+% no icons or graphics.
 %
 % Placeholders are substituted by generate.js. Content comes only from
 % master-facts.json — nothing is authored here.
 
 \documentclass[letterpaper,10pt]{article}
 
-\usepackage[margin=0.5in]{geometry}
-\usepackage[hidelinks]{hyperref}
-% CRITICAL FOR ATS — cmap MUST come before fontenc.
-% pdflatex renders "fi"/"fl" as single ligature glyphs with no reverse mapping,
-% so text extraction turns "profile" into "prole", "workflows" into "workows"
-% and "unified" into "unied" — silently corrupting exactly the keywords a
-% parser matches on. cmap emits a ToUnicode CMap so extraction round-trips;
-% lmodern supplies Type1 outlines that map cleanly. Measured, not assumed:
-% T1 alone extracts "Proled workows unied"; with cmap it extracts correctly.
-% The pdftotext gate in generate.js fails the build if this regresses.
-\usepackage{cmap}
+\usepackage[left=0.5in,right=0.5in,top=0.45in,bottom=0.45in]{geometry}
+
+\usepackage{cmap}                  % MUST precede fontenc — see note 2 above
 \usepackage[T1]{fontenc}
-\usepackage{lmodern}
+\usepackage{charter}               % the professional serif look
 \usepackage[utf8]{inputenc}
+\usepackage{tabularx}
+\usepackage[hidelinks]{hyperref}   % links work but render black, print clean
 \input{glyphtounicode}
 \pdfgentounicode=1
 
-\pagestyle{empty}
 \setlength{\parindent}{0pt}
-\setlength{\parskip}{0pt}
+\pagestyle{empty}
 
-% Section heading: bold, small-caps-free (small caps can extract oddly), with
-% a rule underneath. Plain \section is avoided so no numbering appears.
+% Section heading: bold UPPERCASE with a full-width rule beneath.
+%
+% The source pattern used \scshape here. MEASURED and rejected: small caps
+% renders the first letter full-size and the rest small, and pdftotext reads
+% the result as "E DUCATION" — a parser looking for "Education" does not match.
+% \MakeUppercase carries the same visual weight and extracts as "EDUCATION".
 \newcommand{\resumesection}[1]{%
-  \vspace{6pt}%
-  {\large\bfseries #1}\\[-6pt]%
+  \vspace{4pt}%
+  {\normalsize\bfseries\MakeUppercase{#1}}\\[-5.5pt]%
   \rule{\textwidth}{0.6pt}\\[2pt]%
 }
 
-% One role: title, employer, dates. Kept as flowing text rather than a tabular
-% so extraction preserves reading order.
-\newcommand{\resumerole}[4]{%
-  \vspace{4pt}%
-  {\bfseries #1} \textbar{} #2 \hfill #3\\[1pt]%
-  \ifx&#4&\else{\itshape #4}\\[1pt]\fi%
+% Title flush left, location/dates flush right, on one line.
+\newcommand{\entry}[2]{%
+  \begin{tabular*}{\textwidth}{@{}l@{\extracolsep{\fill}}r@{}}
+    #1 & #2 \\
+  \end{tabular*}%
 }
 
-% Tight bullets without enumitem.
-% NOTE: \setlength inside \begin{itemize} is silently ignored — \list resets
-% these parameters as it opens, so the spacing reverts to LaTeX's roomy
-% defaults and the resume overflows to two pages. They must be passed as
-% \list's second argument, which is what this does.
+% Tight bullets without enumitem. NOTE: \setlength inside \begin{itemize} is
+% silently ignored — \list resets these as it opens — so they are passed as
+% \list's second argument instead.
 \newenvironment{resumebullets}{%
-  \begin{list}{$\bullet$}{%
-    \setlength{\leftmargin}{12pt}%
-    \setlength{\labelsep}{5pt}%
-    \setlength{\labelwidth}{7pt}%
-    \setlength{\itemsep}{0pt}%
+  \begin{list}{\textbullet}{%
+    \setlength{\leftmargin}{1.35em}%
+    \setlength{\labelsep}{0.5em}%
+    \setlength{\labelwidth}{0.85em}%
+    \setlength{\itemsep}{1pt}%
     \setlength{\parsep}{0pt}%
-    \setlength{\topsep}{2pt}%
+    \setlength{\topsep}{1pt}%
     \setlength{\partopsep}{0pt}%
     \setlength{\rightmargin}{0pt}%
   }%
@@ -76,9 +82,9 @@
 \begin{document}
 
 %% NAME %%
-{\huge\bfseries __NAME__}\\[3pt]
-%% CONTACT — must be body text, never a header %%
-__CONTACT__\\[2pt]
+{\LARGE\bfseries __NAME__}\\[2pt]
+%% CONTACT — body text, never a header: parsers skip headers %%
+__CONTACT__\\[1pt]
 
 __SUMMARY__
 
