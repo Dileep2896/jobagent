@@ -132,3 +132,23 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 
 CREATE INDEX IF NOT EXISTS notifications_scenario_idx ON notifications (scenario, sent_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Submission approvals.
+--
+-- CLAUDE.md: submission requires explicit human approval. An approval is per
+-- job, never blanket, and expires -- a stale approval against a form whose
+-- questions have since changed is exactly how a wrong answer gets sent.
+-- consumed_at makes it single-use, so a retry cannot re-submit.
+-- The resume_path recorded here is compared at submit time: if the resume was
+-- rebuilt after approval, the approval no longer refers to what would be sent.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS approvals (
+  job_id       bigint PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  approved_at  timestamptz NOT NULL DEFAULT now(),
+  approved_by  text NOT NULL,
+  resume_path  text,
+  note         text,
+  expires_at   timestamptz NOT NULL DEFAULT now() + interval '24 hours',
+  consumed_at  timestamptz
+);

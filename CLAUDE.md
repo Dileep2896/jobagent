@@ -13,8 +13,12 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 3. generate     - build a tailored resume from master-facts.json
 4. critique     - score against the JD, revise, hard cap 2 revisions
 5. review queue - human approves, then Playwright prefills the form
-6. submit       - only after approval; reuses screening_answers verbatim and
-                  pauses on any question not already answered by the human
+6. submit       - only after `node approve.js --job-id N`. Approval is per
+                  job, expires in 24h, single-use, and pins the resume file.
+                  submit.js is DRY RUN BY DEFAULT; --confirm actually sends.
+                  Refuses unless a pre-flight audit finds every required field
+                  populated and valid, and refuses to record 'applied' without
+                  a confirmation page.
 7. upload       - resume PDF to Google Drive, so anything the agent cannot
                   submit can be applied to manually
 
