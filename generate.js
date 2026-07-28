@@ -207,7 +207,7 @@ function renderProjects(projects) {
   const out = ['\\resumesection{Projects}', '\\begin{resumebullets}'];
   for (const p of projects) {
     const ctx = p.project.context ? ` (${tex(p.project.context)})` : '';
-    out.push(`  \\item {\\bfseries ${tex(p.project.name)}}${ctx} --- ${tex(p.project.text)}`);
+    out.push(`  \\item {\\bfseries ${tex(p.project.name)}}${ctx}: ${tex(p.project.text)}`);
   }
   out.push('\\end{resumebullets}');
   return out.join('\n');

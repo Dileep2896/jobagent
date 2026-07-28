@@ -123,6 +123,22 @@ function main() {
       usedRoles.add(f.role_id);
     }
 
+    // Resume-writing lint. Warnings, not errors — a bullet without a metric is
+    // still true, it is just weaker evidence.
+    if (/[—–]/.test(f.text || '')) {
+      warn(`${label} (${f.id}): contains an em/en dash — reads as AI-written and can extract oddly`);
+    }
+    const SLOP = /\b(leverag\w+|utiliz\w+|spearhead\w+|synerg\w+|seamless\w*|robust|cutting-edge|passionate|delve|holistic|myriad|plethora)\b/i;
+    const slop = (f.text || '').match(SLOP);
+    if (slop) warn(`${label} (${f.id}): "${slop[0]}" is AI-slop vocabulary — prefer a plain verb`);
+
+    const metric = (f.text || '').match(/\d+(\.\d+)?\s*(%|x|\+|K|M|k)|\$\d/);
+    if (!metric) {
+      warn(`${label} (${f.id}): no quantified outcome — XYZ bullets need a measure`);
+    } else if (metric.index > (f.text || '').length * 0.5) {
+      warn(`${label} (${f.id}): metric buried at the end — lead with the result (XYZ)`);
+    }
+
     if (!Array.isArray(f.skills) || f.skills.length === 0) {
       warn(`${label} (${f.id}): no skills listed — weakens JD keyword-coverage scoring`);
     }
