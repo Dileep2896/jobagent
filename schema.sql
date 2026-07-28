@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS companies (
 --   filtering     claimed by a filter.js worker       (transient)
 --   shortlisted   passed the fit filter               (stage 3 input)
 --   filtered_out  rejected by the fit filter          (terminal)
---   filter_failed filter errored repeatedly           (terminal, needs a look)
+--   filter_failed  filter errored repeatedly          (terminal, needs a look)
+--   ready_for_review  application prepared, awaiting the human's approval
+--                     (CLAUDE.md: submission requires explicit approval)
 --
 -- Stage 3 will need to extend this CHECK constraint with its own states.
 -- ---------------------------------------------------------------------------
@@ -47,7 +49,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 
   status         text NOT NULL DEFAULT 'new'
                  CHECK (status IN ('new', 'filtering', 'shortlisted',
-                                   'filtered_out', 'filter_failed')),
+                                   'filtered_out', 'filter_failed',
+                                   'ready_for_review')),
   filter_reason  text,
   filter_attempts integer NOT NULL DEFAULT 0,
 
