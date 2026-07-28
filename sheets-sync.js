@@ -2,9 +2,10 @@
 'use strict';
 
 /**
- * Mirrors the pipeline into a Google Sheet so applications can be tracked and
- * edited by hand — including rows the agent could not submit, which you apply
- * to manually using the resume link in the sheet.
+ * Logs APPLIED jobs to a Google Sheet — one row per real submission, whether
+ * the agent made it or you did by hand. Not a mirror of the whole pipeline:
+ * a job appears only once applied_at is set, and its row then tracks the
+ * outcome (applied -> interview / rejected).
  *
  * Postgres stays the source of truth. The sheet is a view you can annotate;
  * nothing here reads your edits back into the database.
@@ -158,15 +159,18 @@ async function main() {
     return;
   }
 
-  // Only jobs that have actually been triaged are worth tracking; the raw
-  // discovery backlog would swamp the sheet with hundreds of unscored rows.
+  // Applied jobs only. The sheet is an application log, not a pipeline mirror:
+  // shortlisted-but-not-applied jobs live in Discord and Postgres, and putting
+  // them here would bury the rows that represent real submissions.
+  // applied_at is the truth test — status then tracks the outcome
+  // (applied -> interview / rejected).
   const { rows: jobs } = await pool.query(
     `SELECT j.id, j.title, j.location, j.url, j.status, j.filter_score, j.filter_reason,
             j.first_seen_at, j.applied_at, j.applied_method, j.resume_drive_url,
             c.name AS company
        FROM jobs j
        JOIN companies c ON c.id = j.company_id
-      WHERE j.status IN ('shortlisted', 'ready_for_review', 'filter_failed')
+      WHERE j.applied_at IS NOT NULL
         ${all ? '' : 'AND (j.sheet_synced_at IS NULL OR j.updated_at > j.sheet_synced_at)'}
       ORDER BY j.id`
   );

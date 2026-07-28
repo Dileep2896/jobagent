@@ -106,6 +106,39 @@ const SCENARIOS = {
            LIMIT $1`,
   },
 
+  interview: {
+    env: 'JOBAGENT_WEBHOOK_INTERVIEW',
+    colour: 0xa371f7,
+    heading: (n) => `**${n} interview${n === 1 ? '' : 's'} 🎉**`,
+    empty: 'No interview invitations.',
+    sql: `SELECT j.id, j.title, j.location, j.url,
+                 concat_ws(E'\n', j.outcome_evidence,
+                           CASE WHEN j.resume_drive_url IS NOT NULL
+                                THEN '📄 Resume sent: ' || j.resume_drive_url END) AS note,
+                 j.filter_score AS score, c.name AS company
+            FROM jobs j
+            JOIN companies c ON c.id = j.company_id
+       LEFT JOIN notifications n ON n.job_id = j.id AND n.scenario = 'interview'
+           WHERE j.status = 'interview' AND n.job_id IS NULL
+        ORDER BY j.outcome_at DESC NULLS LAST, j.id
+           LIMIT $1`,
+  },
+
+  rejected: {
+    env: 'JOBAGENT_WEBHOOK_REJECTED',
+    colour: 0x6e7681,
+    heading: (n) => `**${n} rejection${n === 1 ? '' : 's'}**`,
+    empty: 'No rejections.',
+    sql: `SELECT j.id, j.title, j.location, j.url, j.outcome_evidence AS note,
+                 j.filter_score AS score, c.name AS company
+            FROM jobs j
+            JOIN companies c ON c.id = j.company_id
+       LEFT JOIN notifications n ON n.job_id = j.id AND n.scenario = 'rejected'
+           WHERE j.status = 'rejected' AND n.job_id IS NULL
+        ORDER BY j.outcome_at DESC NULLS LAST, j.id
+           LIMIT $1`,
+  },
+
   errors: {
     env: 'JOBAGENT_WEBHOOK_ERRORS',
     colour: 0xda3633,

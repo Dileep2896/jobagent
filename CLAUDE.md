@@ -29,9 +29,10 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 - Discord is CONNECTED and verified live (webhook "Job Agent", guild
   1531529259573837834). The URL lives in .env (mode 600, gitignored) — load
   with: set -a; . ./.env; set +a
-- Channels wired so far: shortlist -> its own #job-shortlist webhook
-  (channel 1531530887739474021). discoveries/review/errors still fall back to
-  the default channel until their webhooks are added to .env.
+- All six Discord channels wired and verified live: discoveries, shortlist,
+  review, errors, interview, rejected. Webhooks in .env.
+- Job statuses: new -> filtering -> shortlisted|filtered_out|filter_failed,
+  then ready_for_review -> applied -> interview|rejected.
 - notify.js routes four scenarios, one webhook per channel, each falling back
   to JOBAGENT_WEBHOOK_URL when unset: JOBAGENT_WEBHOOK_DISCOVERIES,
   _SHORTLIST, _REVIEW, _ERRORS. A Discord webhook is bound to one channel and
@@ -47,7 +48,9 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   1IGsxWbde4zPW-FTdVPocresJzIFxO3rZ  (owner dkus2896@gmail.com)
 - Tracking sheet "Job Applications Tracker":
   1aAGCe9Gvi8J4WT3blsAj1mRFCrNPS9UQFk8A6ocZHTM  (inside that folder)
-  Postgres stays the source of truth; the sheet is a hand-annotatable view.
+  APPLIED JOBS ONLY — one row per real submission (applied_at IS NOT NULL),
+  then tracking the outcome. Shortlisted-but-not-applied jobs stay in Discord
+  and Postgres. Postgres remains the source of truth.
   sheets-sync.js reconciles by Job ID in column A, not by remembered row
   number, so sorting or deleting rows by hand cannot corrupt the mapping.
   Needs the SAME service account as drive-upload.js, plus the Sheets API

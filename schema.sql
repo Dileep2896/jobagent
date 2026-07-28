@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   status         text NOT NULL DEFAULT 'new'
                  CHECK (status IN ('new', 'filtering', 'shortlisted',
                                    'filtered_out', 'filter_failed',
-                                   'ready_for_review')),
+                                   'ready_for_review', 'applied',
+                                   'interview', 'rejected')),
   filter_reason  text,
   filter_attempts integer NOT NULL DEFAULT 0,
 
@@ -103,6 +104,12 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applied_method       text
   CHECK (applied_method IS NULL OR applied_method IN ('agent', 'manual'));
 
 -- Rows still needing a push to the tracking spreadsheet.
+-- Outcome tracking. outcome_evidence keeps the quoted line the classification
+-- was based on, so a wrong call can be audited rather than guessed at.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS outcome_at       timestamptz;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS outcome_source   text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS outcome_evidence text;
+
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sheet_synced_at timestamptz;
 CREATE INDEX IF NOT EXISTS jobs_sheet_pending_idx
   ON jobs (id) WHERE sheet_synced_at IS NULL;
