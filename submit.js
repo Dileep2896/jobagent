@@ -116,6 +116,27 @@ async function main() {
     throw new Error(`resume missing at ${job.resume_path} — run generate.js`);
   }
 
+  // Guard 7: the resume must be THIS job's resume.
+  //
+  // generate.js names every PDF deterministically from the company and title, so
+  // the filename is checkable evidence of what the document was tailored for.
+  // Nothing else verifies this: resume_path is just a string, and a stale or
+  // mis-set row would attach a resume written for another company without a
+  // single guard objecting. A dry run during development attached a "Match Group
+  // — Director of AI" resume to a Stripe backend application and every other
+  // check passed it. That reaches a real employer under --auto.
+  {
+    const slug = `${job.company}_${job.title || 'role'}`.replace(/[^A-Za-z0-9]+/g, '_').slice(0, 60);
+    const expected = `${facts.contact.name.replace(/[^A-Za-z0-9]+/g, '_')}_${slug}`;
+    const actual = path.basename(job.resume_path, '.pdf');
+    if (actual !== expected) {
+      throw new Error(
+        `resume does not belong to this job — expected "${expected}.pdf", found "${actual}.pdf". ` +
+        `Re-run: node generate.js --job-id ${jobId}`
+      );
+    }
+  }
+
   // Why this job could not be sent, recorded for the tracking sheet so the human
   // sees the exact blocking question instead of a bare "not applied". Only
   // written in --auto: a hand-driven run is already being watched by a person.
