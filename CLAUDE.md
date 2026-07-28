@@ -26,6 +26,12 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   box is a 4-core Skylake i5 with no usable GPU compute, so an 8B model runs
   ~2-3 min/job — roughly 35 hours for the current 733-job backlog, versus
   ~$1-2 and minutes via the API. Revisit only if privacy forces it.
+- Notifications and Drive uploads use credentials stored on this box, NOT the
+  claude.ai MCP connectors. Those connectors are scoped to an interactive chat
+  session and are unavailable to cron. Slack needs an incoming webhook URL;
+  Drive needs a service-account JSON key (drive.file scope only).
+- Drive destination folder "Job Applications":
+  1IGsxWbde4zPW-FTdVPocresJzIFxO3rZ  (owner dkus2896@gmail.com)
 - Resume PDFs are built from .tex. ATS constraints are non-negotiable and
   mechanically checkable: single column, no tables for layout, no headers or
   footers holding contact info, standard section headers, contact details in
