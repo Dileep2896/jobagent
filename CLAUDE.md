@@ -29,6 +29,9 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 - Discord is CONNECTED and verified live (webhook "Job Agent", guild
   1531529259573837834). The URL lives in .env (mode 600, gitignored) — load
   with: set -a; . ./.env; set +a
+- Channels wired so far: shortlist -> its own #job-shortlist webhook
+  (channel 1531530887739474021). discoveries/review/errors still fall back to
+  the default channel until their webhooks are added to .env.
 - notify.js routes four scenarios, one webhook per channel, each falling back
   to JOBAGENT_WEBHOOK_URL when unset: JOBAGENT_WEBHOOK_DISCOVERIES,
   _SHORTLIST, _REVIEW, _ERRORS. A Discord webhook is bound to one channel and
