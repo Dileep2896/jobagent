@@ -51,6 +51,11 @@ const SCENARIOS = {
   discoveries: {
     env: 'JOBAGENT_WEBHOOK_DISCOVERIES',
     colour: 0x58a6ff,
+    // Volume channel. Discovery routinely finds hundreds of jobs at once, and
+    // one card per posting would bury the shortlist channel you actually act
+    // on. This posts a single roll-up instead, so it reads as a heartbeat:
+    // the poller ran, here is what it found, the filter will triage it.
+    summaryOnly: true,
     heading: (n) => `**${n} new job${n === 1 ? '' : 's'} discovered**`,
     empty: 'No new postings since the last digest.',
     sql: `SELECT j.id, j.title, j.location, j.url, NULL::text AS note, NULL::numeric AS score,
@@ -142,6 +147,32 @@ async function pipelineSummary() {
     `${by.filtered_out || 0} filtered out` +
     (by.filter_failed ? ` · ${by.filter_failed} failed` : '')
   );
+}
+
+/** One roll-up message: counts by company, no per-job cards. */
+function buildSummaryDiscord(scenario, jobs, summary) {
+  const s = SCENARIOS[scenario];
+  const byCompany = {};
+  for (const j of jobs) byCompany[j.company] = (byCompany[j.company] || 0) + 1;
+  const lines = Object.entries(byCompany)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 15)
+    .map(([co, n]) => `• ${co}: ${n}`);
+
+  return [
+    {
+      content: `${summary}\n\n${s.heading(jobs.length)}`,
+      embeds: [
+        {
+          title: 'By company',
+          description: truncate(lines.join('\n'), 3500) || '—',
+          color: s.colour,
+          footer: { text: 'Awaiting the fit filter — nothing scored yet.' },
+        },
+      ],
+      allowed_mentions: { parse: [] },
+    },
+  ];
 }
 
 function buildDiscord(scenario, jobs, overflow, summary) {
@@ -278,7 +309,10 @@ async function runScenario(name, { dryRun, limit, summary }) {
     return { skipped: true };
   }
 
-  const { rows: jobs } = await pool.query(s.sql, [limit]);
+  // A summary scenario reports on everything outstanding, not a page of it —
+  // otherwise the "N discovered" headline would undercount its own backlog.
+  const effectiveLimit = s.summaryOnly ? 5000 : limit;
+  const { rows: jobs } = await pool.query(s.sql, [effectiveLimit]);
   // Same query, effectively unbounded, to size the backlog behind this digest.
   // Keep the $1 placeholder — rewriting it out would leave a bound parameter
   // with nothing to bind to.
@@ -296,9 +330,11 @@ async function runScenario(name, { dryRun, limit, summary }) {
 
   const platform = url ? detectPlatform(url) : 'discord';
   const payloads =
-    platform === 'discord'
-      ? buildDiscord(name, jobs, overflow, summary)
-      : buildSlack(name, jobs, overflow, summary);
+    platform !== 'discord'
+      ? buildSlack(name, jobs, overflow, summary)
+      : s.summaryOnly
+        ? buildSummaryDiscord(name, jobs, summary)
+        : buildDiscord(name, jobs, overflow, summary);
 
   if (dryRun) {
     log(`[dry run] ${name} -> ${s.env}${process.env[s.env] ? '' : ' (falling back to default)'}, ${payloads.length} message(s):`);
