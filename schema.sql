@@ -84,11 +84,20 @@ CREATE INDEX IF NOT EXISTS jobs_score_idx
   ON jobs (filter_score DESC) WHERE status = 'shortlisted';
 
 -- ---------------------------------------------------------------------------
--- Notifications (notify.js). `notified_at` is stamped only after a webhook
--- delivery succeeds, so a failed or interrupted digest re-sends next run
--- rather than silently dropping jobs.
+-- Notifications (notify.js).
+--
+-- One row per (job, scenario), written ONLY after the webhook carrying that
+-- job returns success. A failed or interrupted digest therefore re-sends next
+-- run rather than silently dropping jobs, and a job can be announced once per
+-- scenario without the scenarios interfering with each other.
 -- ---------------------------------------------------------------------------
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notified_at timestamptz;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notified_at timestamptz;  -- legacy
 
-CREATE INDEX IF NOT EXISTS jobs_unnotified_idx
-  ON jobs (id) WHERE notified_at IS NULL;
+CREATE TABLE IF NOT EXISTS notifications (
+  job_id   bigint NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  scenario text   NOT NULL,
+  sent_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (job_id, scenario)
+);
+
+CREATE INDEX IF NOT EXISTS notifications_scenario_idx ON notifications (scenario, sent_at DESC);

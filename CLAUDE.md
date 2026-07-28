@@ -26,6 +26,16 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   box is a 4-core Skylake i5 with no usable GPU compute, so an 8B model runs
   ~2-3 min/job — roughly 35 hours for the current 733-job backlog, versus
   ~$1-2 and minutes via the API. Revisit only if privacy forces it.
+- Discord is CONNECTED and verified live (webhook "Job Agent", guild
+  1531529259573837834). The URL lives in .env (mode 600, gitignored) — load
+  with: set -a; . ./.env; set +a
+- notify.js routes four scenarios, one webhook per channel, each falling back
+  to JOBAGENT_WEBHOOK_URL when unset: JOBAGENT_WEBHOOK_DISCOVERIES,
+  _SHORTLIST, _REVIEW, _ERRORS. A Discord webhook is bound to one channel and
+  CANNOT create channels — that needs a bot token with Manage Channels, so the
+  channels themselves are created by hand.
+- Per-scenario idempotency lives in the `notifications` table (job_id,
+  scenario), written only after the carrying webhook succeeds.
 - Notifications and Drive uploads use credentials stored on this box, NOT the
   claude.ai MCP connectors. Those connectors are scoped to an interactive chat
   session and are unavailable to cron. Slack needs an incoming webhook URL;

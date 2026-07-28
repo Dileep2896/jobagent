@@ -2,33 +2,34 @@
 'use strict';
 
 /**
- * Pipeline notifier — posts a digest to Discord or Slack.
+ * Pipeline notifier — posts per-scenario digests to Discord (or Slack).
  *
  * WHAT THIS REPORTS, AND WHAT IT DOES NOT
- * This pipeline never submits an application (see CLAUDE.md: stage 5 stops at
- * ready_for_review, and screening questions are always answered by a human).
- * So there is no "applied" event to report. What this sends is pipeline state:
- * what was discovered, what passed the fit filter, what is waiting on YOU, and
- * what errored. Treat every digest as a to-do list, not a receipt.
+ * This pipeline never submits an application on its own (CLAUDE.md: submission
+ * requires explicit human approval, and screening questions are answered by the
+ * human). Every digest is a to-do list, not a receipt.
  *
- * Both Discord and Slack are supported; the format is chosen from the webhook
- * hostname, so you only ever set one env var.
+ * CHANNEL ROUTING
+ * A Discord webhook is bound to one channel, so "one channel per scenario"
+ * means one webhook per scenario. Set whichever you want; anything unset falls
+ * back to JOBAGENT_WEBHOOK_URL, so a single-channel setup keeps working.
  *
- *   export JOBAGENT_WEBHOOK_URL='https://discord.com/api/webhooks/...'
- *   export JOBAGENT_WEBHOOK_URL='https://hooks.slack.com/services/...'
+ *   JOBAGENT_WEBHOOK_URL          fallback / default channel
+ *   JOBAGENT_WEBHOOK_DISCOVERIES  #job-discoveries  — new postings found
+ *   JOBAGENT_WEBHOOK_SHORTLIST    #job-shortlist    — passed the filter, scored
+ *   JOBAGENT_WEBHOOK_REVIEW       #job-review       — awaiting your approval
+ *   JOBAGENT_WEBHOOK_ERRORS       #job-errors       — failures needing a look
  *
- * Idempotency: a job is stamped `notified_at` only after the webhook that
- * mentioned it returned success. A crash or a failed delivery therefore
- * re-sends next run instead of silently dropping jobs, and a successful run
- * never repeats itself.
+ * Idempotency: a job is recorded in `notifications` for a scenario only after
+ * the webhook carrying it succeeded, so a failed delivery re-sends next run and
+ * a successful one never repeats.
  *
- * Usage:  node notify.js [--dry-run] [--limit N]
+ * Usage:  node notify.js [--dry-run] [--scenario name] [--limit N]
  */
 
 const { Pool } = require('pg');
 
-const WEBHOOK_URL = process.env.JOBAGENT_WEBHOOK_URL || '';
-const MAX_JOBS_PER_DIGEST = 25; // keep messages readable; the rest go next run
+const MAX_JOBS_PER_DIGEST = 25;
 const MAX_RETRIES = 4;
 const BASE_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
@@ -41,13 +42,86 @@ const pool = new Pool({
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+const truncate = (s, n) => (!s ? '' : s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// ---------------------------------------------------------------------------
+// Scenarios. Each selects its own jobs and renders its own card.
+// ---------------------------------------------------------------------------
+const SCENARIOS = {
+  discoveries: {
+    env: 'JOBAGENT_WEBHOOK_DISCOVERIES',
+    colour: 0x58a6ff,
+    heading: (n) => `**${n} new job${n === 1 ? '' : 's'} discovered**`,
+    empty: 'No new postings since the last digest.',
+    sql: `SELECT j.id, j.title, j.location, j.url, NULL::text AS note, NULL::numeric AS score,
+                 c.name AS company
+            FROM jobs j
+            JOIN companies c ON c.id = j.company_id
+       LEFT JOIN notifications n ON n.job_id = j.id AND n.scenario = 'discoveries'
+           WHERE n.job_id IS NULL
+        ORDER BY j.id
+           LIMIT $1`,
+  },
+
+  shortlist: {
+    env: 'JOBAGENT_WEBHOOK_SHORTLIST',
+    colour: 0x2ea043,
+    heading: (n) => `**${n} new shortlisted job${n === 1 ? '' : 's'} to review**`,
+    empty: 'No new shortlisted jobs since the last digest.',
+    footer: 'Nothing has been submitted — these need your review.',
+    sql: `SELECT j.id, j.title, j.location, j.url, j.filter_reason AS note,
+                 j.filter_score AS score, c.name AS company
+            FROM jobs j
+            JOIN companies c ON c.id = j.company_id
+       LEFT JOIN notifications n ON n.job_id = j.id AND n.scenario = 'shortlist'
+           WHERE j.status = 'shortlisted' AND n.job_id IS NULL
+        ORDER BY j.filter_score DESC NULLS LAST, j.id
+           LIMIT $1`,
+  },
+
+  review: {
+    env: 'JOBAGENT_WEBHOOK_REVIEW',
+    colour: 0xd29922,
+    heading: (n) => `**${n} application${n === 1 ? '' : 's'} ready for your approval**`,
+    empty: 'Nothing awaiting approval.',
+    footer: 'Approve to submit. Screening answers stay yours — nothing is auto-answered.',
+    // Stage 5 is not built yet; the status simply never matches until it is.
+    sql: `SELECT j.id, j.title, j.location, j.url, j.filter_reason AS note,
+                 j.filter_score AS score, c.name AS company
+            FROM jobs j
+            JOIN companies c ON c.id = j.company_id
+       LEFT JOIN notifications n ON n.job_id = j.id AND n.scenario = 'review'
+           WHERE j.status = 'ready_for_review' AND n.job_id IS NULL
+        ORDER BY j.id
+           LIMIT $1`,
+  },
+
+  errors: {
+    env: 'JOBAGENT_WEBHOOK_ERRORS',
+    colour: 0xda3633,
+    heading: (n) => `**${n} job${n === 1 ? ' needs' : 's need'} a look — filter failed**`,
+    empty: 'No failures.',
+    sql: `SELECT j.id, j.title, j.location, j.url, j.filter_reason AS note,
+                 NULL::numeric AS score, c.name AS company
+            FROM jobs j
+            JOIN companies c ON c.id = j.company_id
+       LEFT JOIN notifications n ON n.job_id = j.id AND n.scenario = 'errors'
+           WHERE j.status = 'filter_failed' AND n.job_id IS NULL
+        ORDER BY j.id
+           LIMIT $1`,
+  },
+};
+
+function webhookFor(scenario) {
+  return process.env[SCENARIOS[scenario].env] || process.env.JOBAGENT_WEBHOOK_URL || '';
+}
 
 function detectPlatform(url) {
   let host;
   try {
     host = new URL(url).hostname;
   } catch {
-    throw new Error(`JOBAGENT_WEBHOOK_URL is not a valid URL`);
+    throw new Error('webhook URL is not a valid URL');
   }
   if (/(^|\.)discord(app)?\.com$/.test(host)) return 'discord';
   if (/(^|\.)slack\.com$/.test(host)) return 'slack';
@@ -55,40 +129,14 @@ function detectPlatform(url) {
 }
 
 // ---------------------------------------------------------------------------
-// Content
+// Rendering
 // ---------------------------------------------------------------------------
-async function gatherDigest(limit) {
-  const { rows: counts } = await pool.query(
-    `SELECT status, count(*)::int AS n FROM jobs GROUP BY status`
-  );
-  const by = Object.fromEntries(counts.map((r) => [r.status, r.n]));
+// Discord's ceilings. The 6000 is across ALL embeds in a message, not each.
+const DISCORD = { embedsPerMessage: 10, totalEmbedChars: 6000, title: 256 };
 
-  // Newly shortlisted jobs the user has not been told about yet. These are the
-  // actionable items — everything else is just a running total.
-  const { rows: fresh } = await pool.query(
-    `SELECT j.id, j.title, j.location, j.url, j.filter_reason, c.name AS company
-       FROM jobs j
-       JOIN companies c ON c.id = j.company_id
-      WHERE j.status = 'shortlisted' AND j.notified_at IS NULL
-      ORDER BY j.id
-      LIMIT $1`,
-    [limit]
-  );
-
-  const { rows: [{ n: pending }] } = await pool.query(
-    `SELECT count(*)::int AS n FROM jobs
-      WHERE status = 'shortlisted' AND notified_at IS NULL`
-  );
-
-  return { by, fresh, pending, overflow: Math.max(0, pending - fresh.length) };
-}
-
-function truncate(s, n) {
-  if (!s) return '';
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}
-
-function summaryLine(by) {
+async function pipelineSummary() {
+  const { rows } = await pool.query(`SELECT status, count(*)::int AS n FROM jobs GROUP BY status`);
+  const by = Object.fromEntries(rows.map((r) => [r.status, r.n]));
   return (
     `Pipeline: ${by.new || 0} awaiting filter · ${by.shortlisted || 0} shortlisted · ` +
     `${by.filtered_out || 0} filtered out` +
@@ -96,73 +144,21 @@ function summaryLine(by) {
   );
 }
 
-function buildLines(digest) {
-  const { by, fresh, overflow } = digest;
-  const lines = [];
+function buildDiscord(scenario, jobs, overflow, summary) {
+  const s = SCENARIOS[scenario];
 
-  lines.push(summaryLine(by));
-
-  if (fresh.length === 0) {
-    lines.push('', 'No new shortlisted jobs since the last digest.');
-    return lines;
+  if (jobs.length === 0) {
+    return [{ content: `${summary}\n\n${s.empty}`, allowed_mentions: { parse: [] } }];
   }
 
-  lines.push('', `${fresh.length} new shortlisted job${fresh.length === 1 ? '' : 's'} to review:`);
-  for (const j of fresh) {
-    const where = j.location ? ` — ${truncate(j.location, 40)}` : '';
-    const title = truncate(j.title || '(untitled)', 90);
-    lines.push(j.url ? `• ${j.company}: ${title}${where}\n  ${j.url}` : `• ${j.company}: ${title}${where}`);
-    if (j.filter_reason) lines.push(`  ↳ ${truncate(j.filter_reason, 160)}`);
-  }
-  if (overflow > 0) lines.push('', `…and ${overflow} more, queued for the next digest.`);
-
-  lines.push('', 'Nothing has been submitted — these need your review.');
-  return lines;
-}
-
-/** Discord caps content at 2000 chars, Slack at ~3000 for a text block. */
-function chunk(lines, limit) {
-  const chunks = [];
-  let buf = '';
-  for (const line of lines) {
-    const candidate = buf ? `${buf}\n${line}` : line;
-    if (candidate.length > limit && buf) {
-      chunks.push(buf);
-      buf = line;
-    } else {
-      buf = candidate;
-    }
-  }
-  if (buf) chunks.push(buf);
-  return chunks;
-}
-
-// Discord's documented ceilings. The 6000-char cap is across ALL embeds in a
-// message, not per embed, and exceeding any of these is a 400 — so chunking
-// has to respect both the count and the running character total.
-const DISCORD = { embedsPerMessage: 10, totalEmbedChars: 6000, title: 256, description: 4096 };
-
-/** Rich embeds: each job becomes a tappable card rather than a line of text. */
-function buildDiscordPayloads(digest) {
-  const { by, fresh, overflow } = digest;
-  const summary = summaryLine(by);
-
-  if (fresh.length === 0) {
-    return [
-      {
-        content: `${summary}\n\nNo new shortlisted jobs since the last digest.`,
-        allowed_mentions: { parse: [] },
-      },
-    ];
-  }
-
-  const embeds = fresh.map((j) => {
+  const embeds = jobs.map((j) => {
+    const scoreTag = j.score != null ? `[${Number(j.score).toFixed(1)}] ` : '';
     const e = {
-      title: truncate(`${j.company} — ${j.title || '(untitled)'}`, DISCORD.title - 6),
-      description: truncate(j.filter_reason || '', 300),
-      color: 0x2ea043,
+      title: truncate(`${scoreTag}${j.company} — ${j.title || '(untitled)'}`, DISCORD.title - 6),
+      description: truncate(j.note || '', 300),
+      color: s.colour,
     };
-    if (j.url) e.url = j.url; // makes the title tappable
+    if (j.url) e.url = j.url;
     if (j.location) e.footer = { text: truncate(j.location, 100) };
     return e;
   });
@@ -185,39 +181,54 @@ function buildDiscordPayloads(digest) {
   if (group.length) groups.push(group);
 
   return groups.map((g, i) => {
-    const payload = { embeds: g, allowed_mentions: { parse: [] } };
-    if (i === 0) {
-      payload.content =
-        `${summary}\n\n**${fresh.length} new shortlisted job${fresh.length === 1 ? '' : 's'} to review:**`;
-    }
+    const p = { embeds: g, allowed_mentions: { parse: [] } };
+    if (i === 0) p.content = `${summary}\n\n${s.heading(jobs.length)}`;
     if (i === groups.length - 1) {
-      const tail = ['Nothing has been submitted — these need your review.'];
-      if (overflow > 0) tail.unshift(`…and ${overflow} more, queued for the next digest.`);
-      payload.content = `${payload.content ? `${payload.content}\n` : ''}${tail.join('\n')}`;
+      const tail = [];
+      if (overflow > 0) tail.push(`…and ${overflow} more, queued for the next digest.`);
+      if (s.footer) tail.push(s.footer);
+      if (tail.length) p.content = `${p.content ? `${p.content}\n` : ''}${tail.join('\n')}`;
     }
-    return payload;
+    return p;
   });
 }
 
-function buildPayloads(platform, digest) {
-  if (platform === 'discord') return buildDiscordPayloads(digest);
-  return chunk(buildLines(digest), 2900).map((text) => ({
-    text,
-    unfurl_links: false,
-    unfurl_media: false,
-  }));
+function buildSlack(scenario, jobs, overflow, summary) {
+  const s = SCENARIOS[scenario];
+  const lines = [summary, ''];
+  if (jobs.length === 0) lines.push(s.empty);
+  else {
+    lines.push(s.heading(jobs.length).replace(/\*\*/g, '*'));
+    for (const j of jobs) {
+      const score = j.score != null ? `[${Number(j.score).toFixed(1)}] ` : '';
+      lines.push(`• ${score}${j.company}: ${truncate(j.title || '(untitled)', 90)}`);
+      if (j.url) lines.push(`  ${j.url}`);
+      if (j.note) lines.push(`  ↳ ${truncate(j.note, 160)}`);
+    }
+    if (overflow > 0) lines.push('', `…and ${overflow} more.`);
+    if (s.footer) lines.push('', s.footer);
+  }
+  // Slack caps a text block around 3000 chars.
+  const out = [];
+  let buf = '';
+  for (const l of lines) {
+    const c = buf ? `${buf}\n${l}` : l;
+    if (c.length > 2900 && buf) {
+      out.push({ text: buf, unfurl_links: false, unfurl_media: false });
+      buf = l;
+    } else buf = c;
+  }
+  if (buf) out.push({ text: buf, unfurl_links: false, unfurl_media: false });
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // Delivery
 // ---------------------------------------------------------------------------
-function backoffMs(attempt) {
-  return Math.floor(Math.random() * Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** attempt));
-}
+const backoffMs = (n) => Math.floor(Math.random() * Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** n));
 
 async function post(url, payload) {
   let lastErr;
-
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(url, {
@@ -226,25 +237,21 @@ async function post(url, payload) {
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-
       if (res.ok) return;
 
-      // Both platforms rate-limit; Discord sends retry_after (seconds).
       if (res.status === 429) {
         const body = await res.text();
         let waitMs = backoffMs(attempt);
         try {
-          const parsed = JSON.parse(body);
-          if (parsed.retry_after) waitMs = Math.min(MAX_BACKOFF_MS, parsed.retry_after * 1000);
-        } catch { /* header-only rate limit; fall back to backoff */ }
+          const p = JSON.parse(body);
+          if (p.retry_after) waitMs = Math.min(MAX_BACKOFF_MS, p.retry_after * 1000);
+        } catch { /* header-only rate limit */ }
         if (attempt === MAX_RETRIES) throw new Error('rate limited, retries exhausted');
         log(`  rate limited — waiting ${waitMs}ms`);
         await sleep(waitMs);
         continue;
       }
-
-      // 4xx other than 429 means a bad or revoked webhook URL. Retrying an
-      // invalid webhook forever would just wedge the digest.
+      // A revoked or mistyped webhook will never succeed; don't wedge the digest.
       if (res.status >= 400 && res.status < 500) {
         const err = new Error(`webhook rejected (${res.status}): ${truncate(await res.text(), 200)}`);
         err.permanent = true;
@@ -255,41 +262,46 @@ async function post(url, payload) {
       if (err.permanent) throw err;
       lastErr = err;
       if (attempt === MAX_RETRIES) break;
-      const delay = backoffMs(attempt);
-      log(`  ${err.message} — retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`);
-      await sleep(delay);
+      const d = backoffMs(attempt);
+      log(`  ${err.message} — retry ${attempt + 1}/${MAX_RETRIES} in ${d}ms`);
+      await sleep(d);
     }
   }
   throw new Error(`delivery failed after ${MAX_RETRIES} retries: ${lastErr && lastErr.message}`);
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-async function main() {
-  const args = process.argv.slice(2);
-  const dryRun = args.includes('--dry-run');
-  const limit = args.includes('--limit')
-    ? Number(args[args.indexOf('--limit') + 1])
-    : MAX_JOBS_PER_DIGEST;
-
-  if (!Number.isFinite(limit) || limit <= 0) throw new Error('--limit requires a positive number');
-
-  if (!WEBHOOK_URL && !dryRun) {
-    throw new Error(
-      'JOBAGENT_WEBHOOK_URL is not set.\n' +
-        '  Discord: Server Settings > Integrations > Webhooks > New Webhook > Copy URL\n' +
-        '  Slack:   api.slack.com/apps > your app > Incoming Webhooks > Add New Webhook\n' +
-        '  Then:    export JOBAGENT_WEBHOOK_URL=\'<paste>\''
-    );
+async function runScenario(name, { dryRun, limit, summary }) {
+  const s = SCENARIOS[name];
+  const url = webhookFor(name);
+  if (!url && !dryRun) {
+    log(`${name}: no webhook (${s.env} unset and no fallback) — skipped`);
+    return { skipped: true };
   }
 
-  const platform = WEBHOOK_URL ? detectPlatform(WEBHOOK_URL) : 'discord';
-  const digest = await gatherDigest(limit);
-  const payloads = buildPayloads(platform, digest);
+  const { rows: jobs } = await pool.query(s.sql, [limit]);
+  // Same query, effectively unbounded, to size the backlog behind this digest.
+  // Keep the $1 placeholder — rewriting it out would leave a bound parameter
+  // with nothing to bind to.
+  const { rows: [{ n: pending }] } = await pool.query(
+    `SELECT count(*)::int AS n FROM (${s.sql}) q`,
+    [1000000]
+  );
+  const overflow = Math.max(0, pending - jobs.length);
+
+  // Quiet scenarios stay quiet: an empty errors channel every hour is noise.
+  if (jobs.length === 0 && name !== 'shortlist') {
+    log(`${name}: nothing to report — skipped`);
+    return { sent: 0, jobs: 0 };
+  }
+
+  const platform = url ? detectPlatform(url) : 'discord';
+  const payloads =
+    platform === 'discord'
+      ? buildDiscord(name, jobs, overflow, summary)
+      : buildSlack(name, jobs, overflow, summary);
 
   if (dryRun) {
-    log(`[dry run] ${platform}, ${payloads.length} message(s):`);
+    log(`[dry run] ${name} -> ${s.env}${process.env[s.env] ? '' : ' (falling back to default)'}, ${payloads.length} message(s):`);
     for (const p of payloads) {
       console.log('---');
       if (p.content || p.text) console.log(p.content || p.text);
@@ -299,23 +311,46 @@ async function main() {
         if (e.footer) console.log(`     (${e.footer.text})`);
       }
     }
-    return;
+    return { sent: payloads.length, jobs: jobs.length, dryRun: true };
   }
 
-  for (const payload of payloads) await post(WEBHOOK_URL, payload);
+  for (const p of payloads) await post(url, p);
 
-  // Stamp only after every message landed.
-  if (digest.fresh.length > 0) {
-    await pool.query(`UPDATE jobs SET notified_at = now() WHERE id = ANY($1)`, [
-      digest.fresh.map((j) => j.id),
-    ]);
+  if (jobs.length > 0) {
+    await pool.query(
+      `INSERT INTO notifications (job_id, scenario)
+       SELECT unnest($1::bigint[]), $2
+       ON CONFLICT DO NOTHING`,
+      [jobs.map((j) => j.id), name]
+    );
+  }
+  log(`${name}: sent ${payloads.length} message(s), ${jobs.length} job(s) recorded${overflow ? `, ${overflow} queued` : ''}`);
+  return { sent: payloads.length, jobs: jobs.length };
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const dryRun = args.includes('--dry-run');
+  const only = args.includes('--scenario') ? args[args.indexOf('--scenario') + 1] : null;
+  const limit = args.includes('--limit') ? Number(args[args.indexOf('--limit') + 1]) : MAX_JOBS_PER_DIGEST;
+
+  if (!Number.isFinite(limit) || limit <= 0) throw new Error('--limit requires a positive number');
+  if (only && !SCENARIOS[only]) {
+    throw new Error(`unknown scenario '${only}' — one of: ${Object.keys(SCENARIOS).join(', ')}`);
+  }
+  if (!process.env.JOBAGENT_WEBHOOK_URL && !only && !dryRun) {
+    const anyChannel = Object.values(SCENARIOS).some((s) => process.env[s.env]);
+    if (!anyChannel) {
+      throw new Error(
+        'No webhook configured. Set JOBAGENT_WEBHOOK_URL, and optionally one per scenario:\n  ' +
+          Object.entries(SCENARIOS).map(([k, s]) => `${s.env}  (${k})`).join('\n  ')
+      );
+    }
   }
 
-  log(
-    `sent ${payloads.length} message(s) to ${platform}; ` +
-      `${digest.fresh.length} job(s) marked notified` +
-      (digest.overflow ? `, ${digest.overflow} queued for next run` : '')
-  );
+  const summary = await pipelineSummary();
+  const names = only ? [only] : Object.keys(SCENARIOS);
+  for (const name of names) await runScenario(name, { dryRun, limit, summary });
 }
 
 main()
