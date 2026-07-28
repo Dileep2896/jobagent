@@ -143,8 +143,12 @@ const DEFAULT_TITLE_EXCLUSIONS = [
   'anti money laundering', 'regulatory',
   'accountant', 'accounting', 'controller', 'tax', 'treasury', 'payroll',
   'audit', 'bookkeep', 'financial analyst', 'credit risk', 'underwriter',
+  'accounts receivable', 'accounts payable',
   'procurement', 'contracting', 'facilities', 'workplace', 'executive assistant',
   'office manager', 'receptionist',
+  // Added after the first paid run classified five of these at 1.0/5 — correct
+  // verdicts, but ~10k tokens to reach a conclusion the title already gave away.
+  'administrative',
   'product manager', 'product management', 'program manager', 'project manager',
   'chief of staff', 'strategy manager',
   'designer', 'design manager', 'illustrator', 'ux researcher',
