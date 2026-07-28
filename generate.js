@@ -23,7 +23,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const { Pool } = require('pg');
 
 const FACTS_PATH = process.env.MASTER_FACTS || 'master-facts.json';
@@ -274,8 +274,14 @@ function renderContact(contact) {
 
 function renderExperience(roles) {
   if (!roles.length) return '';
+  // A role with no surviving bullets is dropped entirely. Emitting the entry
+  // with an empty list environment is a hard LaTeX error ("perhaps a missing
+  // \\item"), and an employer line with nothing under it says nothing anyway.
+  const withBullets = roles.filter((r) => r.bullets && r.bullets.length > 0);
+  if (!withBullets.length) return '';
+
   const out = ['\\resumesection{Experience}'];
-  for (const r of roles) {
+  for (const r of withBullets) {
     const dates = `${tex(r.role.start)} -- ${tex(r.role.end === 'present' ? 'Present' : r.role.end)}`;
     const right = [tex(r.role.location || ''), dates].filter(Boolean).join(' \\textbar{} ');
     out.push(`\\entry{\\textbf{${tex(r.role.company)}} --- ${tex(r.role.title)}}{${right}}`);
@@ -288,7 +294,7 @@ function renderExperience(roles) {
 }
 
 function renderProjects(projects) {
-  if (!projects.length) return '';
+  if (!projects || !projects.length) return '';
   const out = ['\\resumesection{Projects}', '\\begin{resumebullets}'];
   for (const p of projects) {
     const ctx = p.project.context ? ` (${tex(p.project.context)})` : '';
@@ -367,9 +373,67 @@ function renderSummary(facts, job, selection) {
          (credentials.length ? ` ${credentials.join('; ')}.` : '');
 }
 
+/** Markdown mirror of exactly what the PDF shows — the source for the .docx. */
+function renderMarkdown(facts, job, sel) {
+  const c = facts.contact;
+  const links = Object.values(c.links || {}).filter(Boolean).map((u) => u.replace(/^https?:\/\/(www\.)?/, ''));
+  const out = [`# ${c.name}`, '', [c.location, c.email, c.phone, ...links].filter(Boolean).join(' | '), ''];
+
+  out.push('## Experience', '');
+  for (const r of sel.roles.filter((r) => r.bullets.length)) {
+    const end = r.role.end === 'present' ? 'Present' : r.role.end;
+    out.push(`**${r.role.company}** — ${r.role.title}  `, `${r.role.location || ''} | ${r.role.start} – ${end}`, '');
+    for (const b of r.bullets) out.push(`- ${b.fact.text}`);
+    out.push('');
+  }
+  if (sel.projects.length) {
+    out.push('## Projects', '');
+    for (const p of sel.projects) {
+      const ctx = p.project.context ? ` (${p.project.context})` : '';
+      out.push(`- **${p.project.name}**${ctx}: ${p.project.text}`);
+    }
+    out.push('');
+  }
+  const label = (g) => g.replace(/_/g, ' ').replace(/\b\w/g, (x) => x.toUpperCase());
+  out.push('## Skills', '');
+  for (const [g, list] of Object.entries(sel.skills)) out.push(`- **${label(g)}:** ${list.join(', ')}`);
+  out.push('', '## Education', '');
+  for (const e of sel.education) {
+    out.push(`**${e.institution}** — ${e.credential}${e.gpa ? ` (GPA ${e.gpa})` : ''}  `, `${e.location || ''} | ${e.start} – ${e.end}`, '');
+  }
+  return out.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Gates
 // ---------------------------------------------------------------------------
+
+// US Letter, in PostScript points, and the template's 0.45in vertical margins.
+const PAGE_H = 792;
+const MARGIN_PT = 0.45 * 72;
+const MIN_FILL = 0.82; // below this the page reads as padded-out and thin
+
+/**
+ * How much of the usable page the content actually occupies.
+ *
+ * The page-count gate only catches overflow: a half-empty resume is exactly
+ * one page and sails through. Ghostscript's bbox device reports the ink
+ * extents, which turns "does it fit" into "does it fill" — the difference
+ * between a resume that looks deliberate and one that looks thin.
+ */
+function measureFill(pdfPath) {
+  // gs writes the bounding box to STDERR, not stdout — execFileSync returns
+  // only stdout, so this silently measured nothing until spawnSync was used.
+  const r = spawnSync('gs', ['-sDEVICE=bbox', '-dNOPAUSE', '-dBATCH', '-q', pdfPath], { encoding: 'utf8' });
+  if (r.error) return null; // ghostscript absent — unknown, never a failure
+  const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+  const m = out.match(/%%HiResBoundingBox:\s*\S+\s+(\S+)\s+\S+\s+(\S+)/);
+  if (!m) return null;
+  const bottom = parseFloat(m[1]);
+  const top = parseFloat(m[2]);
+  const usable = PAGE_H - 2 * MARGIN_PT;
+  return Math.min(1, (top - bottom) / usable);
+}
 function normalise(s) {
   return String(s).toLowerCase().replace(/\s+/g, ' ').replace(/[^a-z0-9 ]/g, '');
 }
@@ -416,7 +480,8 @@ function runGates(pdfPath, selection, contact, expectedFacts) {
   const pages = (execFileSync('pdfinfo', [pdfPath], { encoding: 'utf8' }).match(/^Pages:\s*(\d+)/m) || [])[1];
   if (pages && Number(pages) !== 1) failures.push(`resume is ${pages} pages, expected 1`);
 
-  return { failures, pages: pages ? Number(pages) : null, chars: txt.length };
+  const fill = measureFill(pdfPath);
+  return { failures, pages: pages ? Number(pages) : null, chars: txt.length, fill };
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +553,7 @@ async function main() {
   let bullets = MAX_TOTAL_BULLETS;
   let projectCap = MAX_PROJECTS;
   let roleCap = MAX_ROLES;
+  let grew = 0;
   let sel = selection;
   let result = null;
 
@@ -507,6 +573,27 @@ async function main() {
     result = runGates(pdfPath, sel, facts.contact, chosen);
 
     const onlyTooLong = result.failures.every((f) => f.includes('pages, expected 1'));
+
+    // One page but thin: add content back rather than shipping a sparse page.
+    // Only grows while there is unused material, and the shrink ladder still
+    // catches it if a growth step tips over into two pages.
+    if (result.failures.length === 0 && result.fill !== null && result.fill < MIN_FILL && grew < 4) {
+      const before = `${bullets}/${projectCap}/${roleCap}`;
+      // Ceilings above the defaults on purpose. The ladder starts at the
+      // default and only shrinks, so growth capped at the same values could
+      // never fire. Bounded by the material that actually exists.
+      const maxRoles = (facts.roles || []).length;
+      const maxProjects = (facts.projects || []).filter((x) => x.verified === true).length;
+      if (roleCap < maxRoles) roleCap += 1;
+      else if (projectCap < maxProjects) projectCap += 1;
+      else if (bullets < 24) bullets += 2;
+      else break; // nothing left to add
+      grew += 1;
+      log(`  page only ${(result.fill * 100).toFixed(0)}% full — growing ${before} -> ${bullets}/${projectCap}/${roleCap}`);
+      sel = selectContent(facts, `${job.title} ${job.description}`, bullets, projectCap, roleCap);
+      continue;
+    }
+
     if (result.failures.length === 0) break;
     if (!onlyTooLong) {
       throw new Error(`ATS gates failed (PDF rejected):\n  - ${result.failures.join('\n  - ')}`);
@@ -545,9 +632,21 @@ async function main() {
     [pdfPath, job.id]
   );
 
+  // Some application portals reject PDFs outright. pandoc gives an editable
+  // Word version from a Markdown mirror of the same selection — same facts,
+  // same order, no second source of truth.
+  const mdPath = pdfPath.replace(/\.pdf$/, '.md');
+  const docxPath = pdfPath.replace(/\.pdf$/, '.docx');
+  fs.writeFileSync(mdPath, renderMarkdown(facts, job, sel));
+  const pd = spawnSync('pandoc', [mdPath, '-o', docxPath], { encoding: 'utf8' });
+  const haveDocx = !pd.error && pd.status === 0 && fs.existsSync(docxPath);
+  if (!haveDocx && !pd.error) log(`  (pandoc failed: ${(pd.stderr || '').trim().slice(0, 120)})`);
+
   log(`✓ ${pdfPath}`);
   log(`  gates passed: ${result.pages} page, ${result.chars} chars extracted, ` +
-      `${finalFacts.length} fact(s) verified present, ${sel.projects.length} project(s)`);
+      `${finalFacts.length} fact(s) verified present, ${sel.projects.length} project(s)` +
+      `${result.fill !== null ? `, ${(result.fill * 100).toFixed(0)}% page fill` : ''}`);
+  if (haveDocx) log(`  also wrote ${path.basename(docxPath)} (editable, for portals that reject PDFs)`);
 }
 
 main()
