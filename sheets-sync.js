@@ -43,10 +43,29 @@ const BASE_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
 const REQUEST_TIMEOUT_MS = 60000;
 
+// 'Action' and 'Blocking' are the two columns the human actually works from:
+// which rows need their hands, and the exact question that stopped the agent.
 const HEADERS = [
   'Job ID', 'Discovered', 'Company', 'Title', 'Location', 'Score',
-  'Status', 'Applied', 'How', 'Resume PDF', 'Job Posting', 'Filter Reason',
+  'Status', 'Action', 'Blocking', 'Applied', 'How', 'Resume PDF',
+  'Job Posting', 'Filter Reason',
 ];
+
+/**
+ * What, if anything, the human has to do with this row.
+ *
+ * The sheet is read by someone deciding where to spend the next ten minutes, so
+ * this answers that directly rather than making them infer it from a status
+ * plus a blank Applied cell.
+ */
+function actionFor(j) {
+  if (j.applied_at) return 'Done — applied';
+  if (j.status === 'rejected' || j.status === 'interview') return 'Done — outcome recorded';
+  if (j.submit_blocker) return 'YOU — apply by hand';
+  if (j.status === 'ready_for_review') return 'Agent will submit next run';
+  if (j.resume_path) return 'Resume ready — prefill pending';
+  return '';
+}
 
 const pool = new Pool({
   host: process.env.PGHOST || '/var/run/postgresql',
@@ -146,8 +165,25 @@ async function readIndex(token) {
   return { index, rowCount: col.length };
 }
 
+/**
+ * Write the header row when the sheet is empty, and REWRITE it when the columns
+ * have changed.
+ *
+ * This used to return early whenever the sheet had any rows at all, which was
+ * fine until HEADERS changed: 'Action' and 'Blocking' were inserted in the
+ * middle, so an already-populated sheet would have kept 12-column headers over
+ * 14-column data and quietly mislabelled every row. Comparing rather than
+ * counting means a layout change repairs itself on the next sync.
+ */
 async function ensureHeaders(token, rowCount) {
-  if (rowCount > 0) return;
+  let existing = [];
+  if (rowCount > 0) {
+    const r = await request(api(`/values/${encodeURIComponent(TAB)}!1:1`), { headers: auth(token) });
+    existing = ((r.values || [])[0] || []).map((v) => String(v).trim());
+  }
+  const same = existing.length === HEADERS.length && HEADERS.every((h, i) => existing[i] === h);
+  if (rowCount > 0 && same) return;
+
   await request(
     api(`/values/${encodeURIComponent(TAB)}!A1?valueInputOption=RAW`),
     {
@@ -156,7 +192,7 @@ async function ensureHeaders(token, rowCount) {
       body: JSON.stringify({ values: [HEADERS] }),
     }
   );
-  log('wrote header row');
+  log(rowCount > 0 ? 'header row rewritten (columns changed)' : 'wrote header row');
 }
 
 const fmtDate = (d) => (d ? new Date(d).toISOString().slice(0, 10) : '');
@@ -170,6 +206,8 @@ function toRow(j) {
     j.location || '',
     j.filter_score == null ? '' : Number(j.filter_score).toFixed(1),
     j.status,
+    actionFor(j),
+    j.submit_blocker || '',
     fmtDate(j.applied_at),
     j.applied_method || '',
     j.resume_drive_url || '',
@@ -212,6 +250,7 @@ async function main() {
   const { rows: jobs } = await pool.query(
     `SELECT j.id, j.title, j.location, j.url, j.status, j.filter_score, j.filter_reason,
             j.first_seen_at, j.applied_at, j.applied_method, j.resume_drive_url,
+            j.resume_path, j.submit_blocker,
             c.name AS company
        FROM jobs j
        JOIN companies c ON c.id = j.company_id

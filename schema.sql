@@ -189,3 +189,13 @@ CREATE TABLE IF NOT EXISTS approvals (
   expires_at   timestamptz NOT NULL DEFAULT now() + interval '24 hours',
   consumed_at  timestamptz
 );
+
+-- ---------------------------------------------------------------------------
+-- Why a job could not be submitted automatically.
+--
+-- Written by submit.js --auto when the pre-flight audit refuses, and surfaced in
+-- the tracking sheet so the human sees the exact blocking question rather than a
+-- bare "not applied". Cleared on a successful submission.
+-- ---------------------------------------------------------------------------
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS submit_blocker    text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS submit_checked_at timestamptz;

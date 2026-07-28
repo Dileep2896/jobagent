@@ -116,6 +116,17 @@ async function main() {
     throw new Error(`resume missing at ${job.resume_path} — run generate.js`);
   }
 
+  // Why this job could not be sent, recorded for the tracking sheet so the human
+  // sees the exact blocking question instead of a bare "not applied". Only
+  // written in --auto: a hand-driven run is already being watched by a person.
+  const recordBlocker = async (why) => {
+    if (!auto) return;
+    await pool.query(
+      `UPDATE jobs SET submit_blocker = $1, submit_checked_at = now(), updated_at = now() WHERE id = $2`,
+      [why ? String(why).slice(0, 800) : null, jobId]
+    );
+  };
+
   const applyUrl = applyUrlFor(job);
   log(`job ${job.id}: ${job.company} — ${job.title}`);
   log(auto && !job.approved_at
@@ -163,16 +174,23 @@ async function main() {
     const before = path.join(SHOT_DIR, `job-${job.id}-before-submit.png`);
     await page.screenshot({ path: before, fullPage: true });
 
+    // Unanswered questions are reported BEFORE blank required fields, because
+    // they are the actionable half: a blank required field is usually just the
+    // downstream symptom of a question nobody has answered, and naming the
+    // question tells the human what to type. Reporting "9 x text (required,
+    // empty)" first told them nothing they could act on.
+    if (res.unanswered.length > 0) {
+      log('REFUSING TO SUBMIT — questions with no pre-written answer:');
+      for (const u of res.unanswered) log(`   ✗ ${u}`);
+      await recordBlocker(`${res.unanswered.length} unanswered: ${res.unanswered.join('; ')}`);
+      throw new Error(`${res.unanswered.length} unanswered question(s) — fill screening_answers in master-facts.json`);
+    }
     if (blanks.length > 0) {
       log('REFUSING TO SUBMIT — required fields are still empty:');
       for (const b of blanks) log(`   ✗ ${b}`);
       log(`screenshot: ${before}`);
+      await recordBlocker(`${blanks.length} required field(s) empty: ${blanks.slice(0, 10).join('; ')}`);
       throw new Error(`${blanks.length} required field(s) empty — an incomplete application is not sent`);
-    }
-    if (res.unanswered.length > 0) {
-      log('REFUSING TO SUBMIT — questions with no pre-written answer:');
-      for (const u of res.unanswered) log(`   ✗ ${u}`);
-      throw new Error(`${res.unanswered.length} unanswered question(s) — fill screening_answers in master-facts.json`);
     }
 
     // ---- Guard 6: the audit must not pass VACUOUSLY ----------------------
@@ -192,6 +210,7 @@ async function main() {
       log(`   ✗ ${res.filled.length} field(s) filled, resume attached: ${attachedResume}`);
       log(`   ✗ URL: ${applyUrl}`);
       log(`   screenshot: ${before}`);
+      await recordBlocker(`no application form found at ${applyUrl} (${res.filled.length} field(s) filled) — apply by hand`);
       throw new Error(
         `form not found at ${applyUrl} — ${res.filled.length} field(s) filled` +
         `${attachedResume ? '' : ', no resume upload control'}. Refusing to submit into a page with no form.`
@@ -263,7 +282,8 @@ async function main() {
     await pool.query(
       `UPDATE jobs
           SET status = 'applied', applied_at = now(), applied_method = 'agent',
-              outcome_evidence = 'confirmation page detected', updated_at = now()
+              outcome_evidence = 'confirmation page detected',
+              submit_blocker = NULL, submit_checked_at = now(), updated_at = now()
         WHERE id = $1`,
       [job.id]
     );
