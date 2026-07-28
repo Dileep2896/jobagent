@@ -68,3 +68,13 @@ CREATE INDEX IF NOT EXISTS jobs_claimed_idx
 
 -- Review queue / reporting.
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);
+
+-- ---------------------------------------------------------------------------
+-- Notifications (notify.js). `notified_at` is stamped only after a webhook
+-- delivery succeeds, so a failed or interrupted digest re-sends next run
+-- rather than silently dropping jobs.
+-- ---------------------------------------------------------------------------
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notified_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS jobs_unnotified_idx
+  ON jobs (id) WHERE notified_at IS NULL;

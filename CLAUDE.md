@@ -43,6 +43,14 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   graceful shutdown. NOT yet run against the real API — this box has no
   Anthropic credentials configured (no ANTHROPIC_API_KEY, no `ant` CLI).
 
+- notify.js posts a digest to Discord or Slack (format auto-detected from the
+  webhook hostname; set JOBAGENT_WEBHOOK_URL). Reports discovered/shortlisted
+  counts and lists jobs awaiting review. `notified_at` is stamped only after
+  delivery succeeds, so a dead webhook re-sends rather than dropping jobs.
+  Verified against a stubbed fetch: both formats, 429 retry, chunking at the
+  2000-char Discord cap, and failure leaving nothing marked notified.
+  NOT yet pointed at a real webhook — needs a URL from the user.
+
 ## Next
 1. Replace CANDIDATE_PROFILE in filter.js — it is a placeholder and every
    verdict depends on it.
