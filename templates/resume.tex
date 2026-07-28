@@ -1,0 +1,93 @@
+% ATS-safe resume template.
+%
+% Every formatting choice here is constrained by how applicant tracking systems
+% parse PDFs (verified against the 2026 guidance and enforced by the pdftotext
+% gate in generate.js):
+%   - Single column. Multi-column layouts interleave when text is extracted.
+%   - No tables, tabular, or minipage for layout. Tables are the single largest
+%     cause of parse failures.
+%   - No header/footer. Contact details in the document body or a parser may
+%     never see them.
+%   - Standard section names (Experience, Education, Skills, Projects).
+%   - No icons or graphics. fontawesome renders as glyphs that extract as junk.
+%   - Only geometry + hyperref, both in texlive-latex-recommended, so this
+%     compiles without texlive-latex-extra.
+%
+% Placeholders are substituted by generate.js. Content comes only from
+% master-facts.json — nothing is authored here.
+
+\documentclass[letterpaper,10pt]{article}
+
+\usepackage[margin=0.5in]{geometry}
+\usepackage[hidelinks]{hyperref}
+% CRITICAL FOR ATS — cmap MUST come before fontenc.
+% pdflatex renders "fi"/"fl" as single ligature glyphs with no reverse mapping,
+% so text extraction turns "profile" into "prole", "workflows" into "workows"
+% and "unified" into "unied" — silently corrupting exactly the keywords a
+% parser matches on. cmap emits a ToUnicode CMap so extraction round-trips;
+% lmodern supplies Type1 outlines that map cleanly. Measured, not assumed:
+% T1 alone extracts "Proled workows unied"; with cmap it extracts correctly.
+% The pdftotext gate in generate.js fails the build if this regresses.
+\usepackage{cmap}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[utf8]{inputenc}
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+
+% Section heading: bold, small-caps-free (small caps can extract oddly), with
+% a rule underneath. Plain \section is avoided so no numbering appears.
+\newcommand{\resumesection}[1]{%
+  \vspace{6pt}%
+  {\large\bfseries #1}\\[-6pt]%
+  \rule{\textwidth}{0.6pt}\\[2pt]%
+}
+
+% One role: title, employer, dates. Kept as flowing text rather than a tabular
+% so extraction preserves reading order.
+\newcommand{\resumerole}[4]{%
+  \vspace{4pt}%
+  {\bfseries #1} \textbar{} #2 \hfill #3\\[1pt]%
+  \ifx&#4&\else{\itshape #4}\\[1pt]\fi%
+}
+
+% Tight bullets without enumitem.
+% NOTE: \setlength inside \begin{itemize} is silently ignored — \list resets
+% these parameters as it opens, so the spacing reverts to LaTeX's roomy
+% defaults and the resume overflows to two pages. They must be passed as
+% \list's second argument, which is what this does.
+\newenvironment{resumebullets}{%
+  \begin{list}{$\bullet$}{%
+    \setlength{\leftmargin}{12pt}%
+    \setlength{\labelsep}{5pt}%
+    \setlength{\labelwidth}{7pt}%
+    \setlength{\itemsep}{0pt}%
+    \setlength{\parsep}{0pt}%
+    \setlength{\topsep}{2pt}%
+    \setlength{\partopsep}{0pt}%
+    \setlength{\rightmargin}{0pt}%
+  }%
+}{\end{list}}
+
+\begin{document}
+
+%% NAME %%
+{\huge\bfseries __NAME__}\\[3pt]
+%% CONTACT — must be body text, never a header %%
+__CONTACT__\\[2pt]
+
+__SUMMARY__
+
+__EXPERIENCE__
+
+__PROJECTS__
+
+__SKILLS__
+
+__EDUCATION__
+
+\end{document}
