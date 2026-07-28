@@ -1,113 +1,124 @@
-% Resume template — Stanford Career Education formatting.
+%==============================================================
+% RESUME TEMPLATE — Dileep Kumar Sharma
+% ATS-friendly, single-column, one page.
 %
-% Follows Stanford's published guidance rather than the denser Charter pattern
-% this replaced:
-%   - Margins 0.75in (Stanford: minimum 0.70). The previous 0.5in read cramped,
-%     and white space is what lets a recruiter scan.
-%   - Helvetica/Arial at 11pt (Stanford: Calibri or Arial, 11-12pt). Carlito,
-%     the metric-compatible Calibri clone, is not installed here; TeX Gyre
-%     Heros is a Helvetica clone and the closest available match to Arial.
-%   - Left-justified throughout: US recruiters scan left to right.
-%   - Company bolded (Stanford: bold whichever of company or title lands
-%     harder; for this candidate the employers carry more weight).
-%   - Experience before Education.
+% This is the user's proven template. generate.js substitutes the __PLACEHOLDER__
+% tokens; everything else — fonts, margins, spacing, section order — is theirs and
+% is not to be "improved" without measuring first. Two earlier rewrites of this
+% file lost ground by following published style guides over what actually renders.
 %
-% Deliberate deviations, both narrow:
-%   - A thin rule under each section heading. Stanford says avoid lines "unless
-%     they help readability"; a single hairline is the standard scanning aid in
-%     nearly every professional resume and earns its place.
-%   - Up to two pages is allowed by Stanford. generate.js still targets one,
-%     because a one-page resume for two years of professional experience is the
-%     stronger document — but the layout no longer fights to achieve it.
+% HAND USE
+%   Fill every __PLACEHOLDER__, delete unused blocks, then:  pdflatex Resume.tex
 %
-% ATS constraints that override aesthetics, each measured against pdftotext:
-%   - cmap MUST precede fontenc. Without it pdflatex emits fi/fl as ligature
-%     glyphs with no reverse mapping and "profile" extracts as "prole".
-%   - Headings use \MakeUppercase, never \scshape: small caps renders the first
-%     letter full size and the rest small, and extraction yields "E DUCATION".
-%   - Single column; contact details in the body, never a header; standard
-%     section names; no icons or graphics.
+% PAGE FILL — the gate that matters
+%   gs -q -dNOPAUSE -dBATCH -sDEVICE=bbox Resume.pdf 2>&1 | grep HiResBoundingBox
+%   Letter is 792pt tall. With a 0.45in bottom margin (32.4pt), content's bottom-y
+%   should land within ~10pt of it. Above ~60pt the page is under-filled: add a
+%   bullet, a project, or a coursework line. generate.js enforces this in code
+%   (SLACK_TARGET_PT / SLACK_UNDERFILL_PT) and grows the content to reach it.
+%   Measuring ink HEIGHT instead of this bottom gap is what let a visibly thin
+%   page pass as "93% full".
 %
-% Placeholders are substituted by generate.js. Content comes only from
-% master-facts.json — nothing is authored here.
+% LaTeX GOTCHAS (generate.js escapes these; they matter for hand use)
+%   %  -> \%      &  -> \&      $  -> \$      |  -> \textbar{}
+%   em dash -> ---            literal ~ -> \textasciitilde
+%
+% SPACING KNOBS (to fill or shrink the page)
+%   geometry margins ....... 0.4in (tight) to 0.6in (loose)
+%   itemsep / topsep ....... 1pt (tight) to 2.5pt (loose)
+%   \titlespacing .......... {before}{after}, e.g. {4pt}{2pt} tight, {6pt}{3pt} loose
+%==============================================================
+\documentclass[letterpaper,10pt]{article}
 
-\documentclass[letterpaper,11pt]{article}
+\usepackage[left=0.5in,right=0.5in,top=0.45in,bottom=0.45in]{geometry}
 
-\usepackage[margin=0.75in]{geometry}
-
-\usepackage{cmap}                  % MUST precede fontenc
+% cmap before fontenc so pdflatex emits reverse glyph mappings. Charter extracts
+% fi/fl correctly without it, verified with pdftotext — this is free insurance, not
+% a fix for an observed bug.
+\usepackage{cmap}
+\usepackage{charter}                       % clean professional serif = the whole "look"
 \usepackage[T1]{fontenc}
-\usepackage[utf8]{inputenc}
-\usepackage{tgheros}               % Helvetica clone ~ Arial
-\renewcommand{\familydefault}{\sfdefault}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{xcolor}
 \usepackage{tabularx}
-\usepackage[hidelinks]{hyperref}
+\usepackage[hidelinks]{hyperref}           % links work but render BLACK (ATS-safe)
 \input{glyphtounicode}
 \pdfgentounicode=1
 
 \setlength{\parindent}{0pt}
 \pagestyle{empty}
 
-% Let long URLs in the contact line break instead of running into the margin.
-% Without this the last link overflowed the right margin by ~0.3in — the ink
-% reached 0.19in from the page edge while every other element stopped correctly.
-\usepackage{url}
-\urlstyle{same}     % URLs in the body font, not typewriter
-\sloppy
-\setlength{\emergencystretch}{3em}
+% Bullet spacing (main knob for page fill)
+\setlist[itemize]{leftmargin=1.35em, itemsep=1.5pt, topsep=1.5pt,
+                  parsep=0pt, partopsep=0pt, label=\textbullet}
 
-% Section heading: bold uppercase, hairline rule beneath.
-\newcommand{\resumesection}[1]{%
-  \vspace{9pt}%
-  {\normalsize\bfseries\MakeUppercase{#1}}\\[-4pt]%
-  % \par, not \\: a \\ after the rule leaves an empty line box when the next
-  % thing is a list, so Projects and Skills sat visibly lower than Experience,
-  % where an \entry fills that line. \par ends the paragraph without one.
-  \rule{\textwidth}{0.5pt}\par\vspace{2pt}%
-}
-
-% Title flush left, location/dates flush right.
+% Section heading: the small-caps LOOK without \scshape.
 %
-% tabularx with an X column, not tabular*: tabular* cannot wrap, so a long left
-% cell (an institution plus a degree plus a GPA) pushed the right-hand dates
-% clean off the page — ink reached the paper edge with zero right margin. X
-% wraps the left cell and keeps the dates inside the text block.
-\newcommand{\entry}[2]{%
-  \begin{tabularx}{\textwidth}{@{}X@{\hspace{1em}}r@{}}
-    #1 & #2 \\
-  \end{tabularx}%
-}
+% Real small caps renders the initial full size and the rest from the SC font, and
+% pdftotext reads the font change as a word break: "S UMMARY", "E XPERIENCE",
+% "PATENTS & P UBLICATIONS". Section headings are exactly what an ATS uses to
+% segment a resume, so that is a real cost for a cosmetic feature.
+%
+% Instead: real uppercase characters throughout, first letter at full size and the
+% remainder at \small. Visually near-identical to \scshape; extracts as clean
+% "SUMMARY" / "EXPERIENCE" / "PATENTS & PUBLICATIONS".
+%
+% Two arguments because splitting the string in TeX is fragile — xstring chokes on
+% the \& in "Patents \& Publications". Arg 1 is the first letter, arg 2 the rest,
+% both already uppercase:  \resumesection{S}{UMMARY}
+% titlesec setup is verbatim from the original template except for the dropped
+% \scshape; only the text handed to \section changes.
+\titleformat{\section}
+  {\normalsize\bfseries}{}{0em}{}[\vspace{-5.5pt}\rule{\textwidth}{0.6pt}]
+\titlespacing{\section}{0pt}{4pt}{2pt}
+\newcommand{\resumesection}[2]{\section*{#1{\small #2}}}
 
-% Bullets. NOTE: \setlength inside \begin{itemize} is silently ignored — \list
-% resets these as it opens — so they are passed as \list's second argument.
-\newenvironment{resumebullets}{%
-  \begin{list}{\textbullet}{%
-    \setlength{\leftmargin}{1.2em}%
-    \setlength{\labelsep}{0.5em}%
-    \setlength{\labelwidth}{0.7em}%
-    \setlength{\itemsep}{2pt}%
-    \setlength{\parsep}{0pt}%
-    \setlength{\topsep}{4pt}%
-    \setlength{\partopsep}{0pt}%
-    \setlength{\rightmargin}{0pt}%
-  }%
-}{\end{list}}
+% \entry{bold title on the left}{date/location flush right}
+%
+% tabular* with an l column cannot wrap, so an over-long left cell silently pushes
+% the right cell off the page. At 10pt over a 7.5in text block that has room to
+% spare — the earlier failure came from setting 11pt on a 6.5in block, not from
+% this pattern. runGates() fails the build on any Overfull \hbox, so a regression
+% here is caught rather than shipped.
+\newcommand{\entry}[2]{%
+  \begin{tabular*}{\textwidth}{@{}l@{\extracolsep{\fill}}r@{}}
+    \textbf{#1} & #2 \\
+  \end{tabular*}\par\vspace{1pt}}
 
 \begin{document}
 
-%% NAME %%
-{\LARGE\bfseries __NAME__}\\[4pt]
-%% CONTACT — body text, never a header: parsers skip headers %%
-__CONTACT__\\[2pt]
+%--------------------- HEADER -----------------------------------
+% Centered body text, not a \pagestyle header: parsers skip real page headers.
+% Named links (LinkedIn / GitHub / Portfolio) rather than bare URLs — shorter, and
+% no unbreakable \href box to overflow the right margin.
+\begin{center}
+  {\LARGE\bfseries __NAME__}\\[2pt]
+  {\large __HEADLINE__}\\[4pt]
+  \small
+  __CONTACT__
+\end{center}
 
+%--------------------- SUMMARY ----------------------------------
 __SUMMARY__
 
-__EXPERIENCE__
-
-__PROJECTS__
-
+%--------------------- SKILLS -----------------------------------
+% Front-loaded: the groups the JD actually asks for come first.
 __SKILLS__
 
+%--------------------- EXPERIENCE -------------------------------
+__EXPERIENCE__
+
+%--------------------- PROJECTS ---------------------------------
+__PROJECTS__
+
+%--------------------- PATENTS & PUBLICATIONS -------------------
+__PATENTS__
+
+%--------------------- EDUCATION --------------------------------
 __EDUCATION__
+
+%--------------------- AWARDS -----------------------------------
+__AWARDS__
 
 \end{document}
