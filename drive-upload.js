@@ -26,6 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const { GoogleAuth } = require('google-auth-library');
+const { Pool } = require('pg');
 
 const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 const FOLDER_ID = process.env.GDRIVE_FOLDER_ID || '';
@@ -172,6 +173,30 @@ async function check() {
   log(`✓ folder reachable: "${folder.name}" (${folder.id})`);
 }
 
+/** Record the Drive link on the job so the review digest can link straight to it. */
+async function recordOnJob(jobId, file, localPath) {
+  const pool = new Pool({
+    host: process.env.PGHOST || '/var/run/postgresql',
+    database: process.env.PGDATABASE || 'jobagent',
+  });
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE jobs
+          SET resume_path = $1,
+              resume_drive_url = $2,
+              resume_drive_file_id = $3,
+              resume_built_at = now(),
+              updated_at = now()
+        WHERE id = $4`,
+      [localPath, file.webViewLink || null, file.id, jobId]
+    );
+    if (rowCount === 0) throw new Error(`no job with id ${jobId}`);
+    log(`  recorded on job ${jobId}`);
+  } finally {
+    await pool.end();
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -179,15 +204,20 @@ async function main() {
 
   const file = args.find((a) => !a.startsWith('--'));
   if (!file) {
-    console.error('usage: node drive-upload.js <file.pdf> [--name "Custom Name.pdf"]');
+    console.error('usage: node drive-upload.js <file.pdf> [--name "Name.pdf"] [--job-id N]');
     console.error('       node drive-upload.js --check');
     process.exitCode = 1;
     return;
   }
   const nameFlag = args.indexOf('--name');
+  const jobFlag = args.indexOf('--job-id');
+  const jobId = jobFlag >= 0 ? Number(args[jobFlag + 1]) : null;
+  if (jobFlag >= 0 && !Number.isInteger(jobId)) throw new Error('--job-id requires an integer');
+
   const result = await uploadFile(file, nameFlag >= 0 ? args[nameFlag + 1] : null);
   log(`${result.replaced ? 'replaced' : 'uploaded'}: ${result.name}`);
   log(`  ${result.webViewLink}`);
+  if (jobId) await recordOnJob(jobId, result, path.resolve(file));
 }
 
 if (require.main === module) {

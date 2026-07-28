@@ -87,6 +87,27 @@ CREATE INDEX IF NOT EXISTS jobs_score_idx
   ON jobs (filter_score DESC) WHERE status = 'shortlisted';
 
 -- ---------------------------------------------------------------------------
+-- Generated resume artefacts and application tracking.
+--
+-- resume_drive_url is what the human clicks when the agent cannot complete a
+-- submission and they need to apply by hand, so it is carried through to the
+-- review digest. applied_at is set only after a human approves and the submit
+-- stage succeeds -- never by the pipeline on its own.
+-- ---------------------------------------------------------------------------
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_path          text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_drive_url     text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_drive_file_id text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_built_at      timestamptz;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applied_at           timestamptz;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applied_method       text
+  CHECK (applied_method IS NULL OR applied_method IN ('agent', 'manual'));
+
+-- Rows still needing a push to the tracking spreadsheet.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sheet_synced_at timestamptz;
+CREATE INDEX IF NOT EXISTS jobs_sheet_pending_idx
+  ON jobs (id) WHERE sheet_synced_at IS NULL;
+
+-- ---------------------------------------------------------------------------
 -- Notifications (notify.js).
 --
 -- One row per (job, scenario), written ONLY after the webhook carrying that

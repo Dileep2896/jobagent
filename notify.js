@@ -91,7 +91,12 @@ const SCENARIOS = {
     empty: 'Nothing awaiting approval.',
     footer: 'Approve to submit. Screening answers stay yours — nothing is auto-answered.',
     // Stage 5 is not built yet; the status simply never matches until it is.
-    sql: `SELECT j.id, j.title, j.location, j.url, j.filter_reason AS note,
+    // The resume link is the whole point of this channel: when the agent
+    // cannot finish a submission, this is what you open to apply by hand.
+    sql: `SELECT j.id, j.title, j.location, j.url,
+                 concat_ws(E'\n', j.filter_reason,
+                           CASE WHEN j.resume_drive_url IS NOT NULL
+                                THEN '📄 Resume: ' || j.resume_drive_url END) AS note,
                  j.filter_score AS score, c.name AS company
             FROM jobs j
             JOIN companies c ON c.id = j.company_id

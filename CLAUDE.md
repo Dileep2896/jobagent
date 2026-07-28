@@ -45,6 +45,13 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   Drive needs a service-account JSON key (drive.file scope only).
 - Drive destination folder "Job Applications":
   1IGsxWbde4zPW-FTdVPocresJzIFxO3rZ  (owner dkus2896@gmail.com)
+- Tracking sheet "Job Applications Tracker":
+  1aAGCe9Gvi8J4WT3blsAj1mRFCrNPS9UQFk8A6ocZHTM  (inside that folder)
+  Postgres stays the source of truth; the sheet is a hand-annotatable view.
+  sheets-sync.js reconciles by Job ID in column A, not by remembered row
+  number, so sorting or deleting rows by hand cannot corrupt the mapping.
+  Needs the SAME service account as drive-upload.js, plus the Sheets API
+  enabled and the sheet shared with the service account as Editor.
 - Filter scoring uses the career-ops A-F rubric (MIT, attributed in filter.js):
   cv_match .45, north_star .30, culture .15, comp .10; shortlist at >= 3.5.
   Comp returns 0 for "insufficient data" when a posting states no salary, and
