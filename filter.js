@@ -18,6 +18,7 @@
  * Usage:  node filter.js [--once] [--limit N]
  */
 
+const fs = require('fs');
 const { Pool } = require('pg');
 const Anthropic = require('@anthropic-ai/sdk');
 
@@ -64,51 +65,127 @@ const MAX_JD_CHARS = 24000; // ~6k tokens; guards against pathological JDs
 const IDLE_SLEEP_MS = 60000; // when no work is queued, in continuous mode
 
 // ---------------------------------------------------------------------------
-// Fit criteria. This is the only place the filter learns what "fit" means.
-// Keep it short and concrete — it is sent on every call.
-// TODO: replace with the real profile once master-facts.json exists.
+// Candidate profile, derived from master-facts.json. Nothing here is authored
+// in this file — if the facts change, the filter changes with them.
 // ---------------------------------------------------------------------------
-const CANDIDATE_PROFILE = `
-Roles wanted: backend / full-stack / platform software engineer.
-Seniority: mid to senior individual contributor. Not a manager, not an intern,
-  not a new grad role.
-Core stack: Node.js, TypeScript, Python, Postgres, AWS.
-Location: remote (US), or hybrid/onsite within commuting distance of Boston, MA.
-Hard blockers: requires an active security clearance; requires relocation
-  outside the US; unpaid; commission-only; primarily sales, support, QA
-  manual-testing, or recruiting work.
-`.trim();
+const FACTS_PATH = process.env.MASTER_FACTS || 'master-facts.json';
 
-const SYSTEM_PROMPT = `You screen job descriptions for a single software engineer.
-You decide only whether this job is worth spending effort on a tailored
-application. You are a cheap first-pass filter: be decisive, not generous.
+function loadProfile() {
+  if (!fs.existsSync(FACTS_PATH)) {
+    throw new Error(`${FACTS_PATH} not found — run: node validate-facts.js`);
+  }
+  const facts = JSON.parse(fs.readFileSync(FACTS_PATH, 'utf8'));
+  const t = facts.targets || {};
+  if (!Array.isArray(t.archetypes) || t.archetypes.length === 0) {
+    throw new Error(`${FACTS_PATH} has no targets.archetypes — the North Star dimension needs them`);
+  }
+
+  // Skills are summarised rather than dumped: the filter judges fit, and the
+  // full fact list would balloon the per-job token cost for no gain.
+  const skillGroups = Object.entries(facts.skills || {})
+    .filter(([k]) => !k.startsWith('_') && k !== 'spoken_languages')
+    .map(([k, v]) => `${k.replace(/_/g, '/')}: ${(v || []).join(', ')}`);
+
+  const recent = (facts.roles || []).slice(0, 3).map((r) => `${r.title} at ${r.company} (${r.start}–${r.end})`);
+
+  return [
+    `Target roles: ${t.archetypes.join(', ')}`,
+    `Seniority: ${t.seniority || 'not specified'}`,
+    `Locations: ${(t.locations || []).join('; ') || 'not specified'}`,
+    '',
+    `Recent experience: ${recent.join(' | ')}`,
+    '',
+    'Skills:',
+    ...skillGroups.map((s) => `  ${s}`),
+    '',
+    'Hard blockers (any one of these means the role is not viable):',
+    ...(t.hard_blockers || []).map((b) => `  - ${b}`),
+  ].join('\n');
+}
+
+/**
+ * Scoring rubric adapted from career-ops (github.com/santifer/career-ops, MIT).
+ *
+ * Two deliberate departures from the original, both because this is a cheap
+ * first-pass filter rather than a deep evaluation:
+ *  - Dimensions that need company research or market salary data are not
+ *    scored here; the model sees only the JD.
+ *  - The model returns per-dimension scores ONLY. The global is computed in
+ *    code below. CLAUDE.md warns that LLM-score-only loops drift, and a
+ *    weighted average is arithmetic — there is no reason to let a model do it.
+ */
+const RUBRIC = `Score each dimension 1-5, judging ONLY what the job description states.
+
+cv_match     — how well the candidate's experience and skills map to the
+               requirements. 5 = meets nearly all; 1 = fundamentally different
+               discipline.
+north_star   — how well the role matches the target archetypes and seniority.
+               5 = squarely one of them; 1 = unrelated role type or wrong level.
+culture      — team, values, remote policy and stability signals in the posting.
+               3 if the posting says nothing either way. Do not infer from the
+               company's reputation.
+comp         — 1-5 versus market ONLY if the posting states a salary or range.
+               If no compensation is stated, return 0 for "insufficient data".
+               Never estimate or invent a number.
+red_flags    — short factual strings, quoting or closely paraphrasing the
+               posting. Include a flag for each hard blocker the posting trips.
+               Empty array if none.`;
+
+const SYSTEM_PROMPT = `You screen job descriptions for one software engineer, as a
+cheap first-pass filter. Be decisive and evidence-bound, not generous.
 
 Candidate profile:
-${CANDIDATE_PROFILE}
+${loadProfile()}
+
+${RUBRIC}
 
 Rules:
-- Set fit=false if the job trips any hard blocker in the profile.
-- Set fit=false if the seniority or role type clearly does not match.
-- Set fit=true only if the role is a plausible match on role type, seniority,
-  and location. Perfect stack overlap is not required.
-- If the job description is empty, truncated, or says nothing about the actual
-  role, set fit=false and say so in the reason.
-- reason must be one sentence, at most 200 characters, stating the single
-  strongest factor behind the verdict. Do not restate the job title.
-- Judge only what the job description says. Do not speculate about the company
-  or infer requirements that are not written down.`;
+- Judge only what the job description says. Do not speculate about the company,
+  and do not infer requirements that are not written down.
+- If the description is empty, truncated, or never describes the actual role,
+  score cv_match and north_star 1 and say so in the reason.
+- reason: one sentence, at most 200 characters, giving the single strongest
+  factor behind the scores. Do not restate the job title.`;
 
-// Structured outputs guarantee this shape; the parse below is belt-and-braces.
+// Structured outputs constrain the shape; the validation below is belt-and-braces.
+const SCORE_1_5 = { type: 'integer', enum: [1, 2, 3, 4, 5] };
 const RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
-    fit: { type: 'boolean' },
+    cv_match: SCORE_1_5,
+    north_star: SCORE_1_5,
+    culture: SCORE_1_5,
+    comp: { type: 'integer', enum: [0, 1, 2, 3, 4, 5] }, // 0 = insufficient data
+    red_flags: { type: 'array', items: { type: 'string' } },
     reason: { type: 'string' },
     confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
   },
-  required: ['fit', 'reason', 'confidence'],
+  required: ['cv_match', 'north_star', 'culture', 'comp', 'red_flags', 'reason', 'confidence'],
   additionalProperties: false,
 };
+
+// career-ops thresholds: 4.5+ apply now, 4.0-4.4 worth applying,
+// 3.5-3.9 only with a specific reason, below 3.5 recommend against.
+const SHORTLIST_THRESHOLD = 3.5;
+const WEIGHTS = { cv_match: 0.45, north_star: 0.3, culture: 0.15, comp: 0.1 };
+const RED_FLAG_PENALTY = 0.5;
+const MAX_RED_FLAG_PENALTY = 1.5;
+
+/**
+ * Deterministic global score. Comp is dropped and the remaining weights
+ * renormalised when the posting states no salary, so a missing range neither
+ * helps nor hurts — the alternative would be scoring a job on data we refused
+ * to invent.
+ */
+function computeGlobal(v) {
+  const dims = Object.entries(WEIGHTS).filter(([k]) => !(k === 'comp' && v.comp === 0));
+  const totalWeight = dims.reduce((n, [, w]) => n + w, 0);
+  const weighted = dims.reduce((n, [k, w]) => n + v[k] * w, 0) / totalWeight;
+
+  const penalty = Math.min(v.red_flags.length * RED_FLAG_PENALTY, MAX_RED_FLAG_PENALTY);
+  const score = Math.max(1, Math.min(5, weighted - penalty));
+  return Math.round(score * 10) / 10;
+}
 
 // ---------------------------------------------------------------------------
 // Clients
@@ -251,14 +328,16 @@ async function claimBatch(limit) {
 }
 
 /** Commit one verdict. Single-row, single statement — the unit of resumability. */
-async function recordVerdict(jobId, status, reason) {
+async function recordVerdict(jobId, status, reason, score, breakdown) {
   await pool.query(
     `UPDATE ${SCHEMA.jobsTable}
         SET ${SCHEMA.status} = $1,
             ${SCHEMA.filterReason} = $2,
+            filter_score = $3,
+            filter_scores = $4,
             ${SCHEMA.updatedAt} = now()
-      WHERE ${SCHEMA.id} = $3`,
-    [status, reason.slice(0, 500), jobId]
+      WHERE ${SCHEMA.id} = $5`,
+    [status, reason.slice(0, 500), score, breakdown ? JSON.stringify(breakdown) : null, jobId]
   );
 }
 
@@ -379,7 +458,12 @@ async function classify(job) {
         throw err;
       }
 
-      if (typeof parsed.fit !== 'boolean' || typeof parsed.reason !== 'string') {
+      const bad =
+        !Array.isArray(parsed.red_flags) ||
+        typeof parsed.reason !== 'string' ||
+        ['cv_match', 'north_star', 'culture'].some((k) => !Number.isInteger(parsed[k]) || parsed[k] < 1 || parsed[k] > 5) ||
+        !Number.isInteger(parsed.comp) || parsed.comp < 0 || parsed.comp > 5;
+      if (bad) {
         const err = new Error(`response failed validation: ${block.text.slice(0, 120)}`);
         err.transient = false;
         throw err;
@@ -417,9 +501,31 @@ async function classify(job) {
 async function processJob(job) {
   try {
     const verdict = await classify(job);
-    const status = verdict.fit ? STATUS.SHORTLISTED : STATUS.FILTERED_OUT;
-    await recordVerdict(job.id, status, verdict.reason);
-    log(`job ${job.id} -> ${status} (${verdict.confidence}): ${verdict.reason}`);
+    const score = computeGlobal(verdict);
+    const status = score >= SHORTLIST_THRESHOLD ? STATUS.SHORTLISTED : STATUS.FILTERED_OUT;
+
+    const breakdown = {
+      cv_match: verdict.cv_match,
+      north_star: verdict.north_star,
+      culture: verdict.culture,
+      comp: verdict.comp === 0 ? null : verdict.comp,
+      red_flags: verdict.red_flags,
+      confidence: verdict.confidence,
+      global: score,
+    };
+
+    // career-ops surfaces this rather than letting a strong CV match bury it.
+    if (score >= 4.5 && verdict.culture <= 2) {
+      log(`job ${job.id}: high technical fit but weak culture signals — verify before applying`);
+    }
+
+    await recordVerdict(job.id, status, verdict.reason, score, breakdown);
+    log(
+      `job ${job.id} -> ${status} ${score.toFixed(1)}/5 ` +
+        `(cv ${verdict.cv_match} · ns ${verdict.north_star} · cul ${verdict.culture}` +
+        `${verdict.comp === 0 ? ' · comp n/a' : ` · comp ${verdict.comp}`}` +
+        `${verdict.red_flags.length ? ` · ${verdict.red_flags.length} flag(s)` : ''}): ${verdict.reason}`
+    );
     return status;
   } catch (err) {
     if (err.transient) {

@@ -70,6 +70,20 @@ CREATE INDEX IF NOT EXISTS jobs_claimed_idx
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);
 
 -- ---------------------------------------------------------------------------
+-- Filter scoring (filter.js), adapted from the career-ops A-F rubric.
+-- filter_score is the 1.0-5.0 global, computed deterministically in code from
+-- the per-dimension scores the model returns -- the model never produces the
+-- global itself. filter_scores keeps the per-dimension breakdown so a verdict
+-- can be audited without re-running the model.
+-- ---------------------------------------------------------------------------
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS filter_score  numeric(2,1);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS filter_scores jsonb;
+
+-- Review queue is ordered best-first.
+CREATE INDEX IF NOT EXISTS jobs_score_idx
+  ON jobs (filter_score DESC) WHERE status = 'shortlisted';
+
+-- ---------------------------------------------------------------------------
 -- Notifications (notify.js). `notified_at` is stamped only after a webhook
 -- delivery succeeds, so a failed or interrupted digest re-sends next run
 -- rather than silently dropping jobs.

@@ -32,6 +32,12 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   Drive needs a service-account JSON key (drive.file scope only).
 - Drive destination folder "Job Applications":
   1IGsxWbde4zPW-FTdVPocresJzIFxO3rZ  (owner dkus2896@gmail.com)
+- Filter scoring uses the career-ops A-F rubric (MIT, attributed in filter.js):
+  cv_match .45, north_star .30, culture .15, comp .10; shortlist at >= 3.5.
+  Comp returns 0 for "insufficient data" when a posting states no salary, and
+  is then dropped with the remaining weights renormalised — never estimated.
+  The model returns per-dimension scores only; the global is arithmetic done
+  in code, per the deterministic-gates rule.
 - Resume PDFs are built from .tex. ATS constraints are non-negotiable and
   mechanically checkable: single column, no tables for layout, no headers or
   footers holding contact info, standard section headers, contact details in
@@ -39,6 +45,10 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   assert the sections, contact info and every cited fact-id survive.
 
 ## Hard rules
+- NEVER make an Anthropic API call without asking first. The API key is the
+  user's own billing. No filter.js runs, no test calls, no "just one job to
+  check" — ask, get a yes, then run. Stubs are fine and are how every stage
+  has been verified so far. (Set by the user, 2026-07-28.)
 - Never invent resume content. Every bullet must map to an id in
   master-facts.json. A generated bullet with no source id is a bug.
 - Never submit without explicit human approval. The pipeline may prepare and
