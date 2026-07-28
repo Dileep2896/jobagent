@@ -35,7 +35,9 @@ const { GoogleAuth } = require('google-auth-library');
 // because it only edits a sheet you already own.
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const SHEET_ID = process.env.GSHEET_ID || '';
-const TAB = process.env.GSHEET_TAB || 'Sheet1';
+// Resolved from the spreadsheet itself unless pinned. The tracker's first tab
+// is called "Untitled", not "Sheet1" — assuming a name makes every range fail.
+let TAB = process.env.GSHEET_TAB || null;
 const MAX_RETRIES = 4;
 const BASE_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
@@ -112,6 +114,15 @@ async function request(url, options = {}) {
   throw new Error(`sheets request failed after ${MAX_RETRIES} retries: ${lastErr && lastErr.message}`);
 }
 
+/** First tab name, read from the spreadsheet unless GSHEET_TAB pins it. */
+async function resolveTab(token) {
+  if (TAB) return TAB;
+  const res = await request(api('?fields=sheets.properties.title'), { headers: auth(token) });
+  const body = await res.json();
+  TAB = (((body.sheets || [])[0] || {}).properties || {}).title || 'Sheet1';
+  return TAB;
+}
+
 const api = (path) => `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}${path}`;
 const auth = (a) => {
   const h = { authorization: `Bearer ${a.token}` };
@@ -183,6 +194,7 @@ async function main() {
     log(`✓ authenticated as ${creds.client_email}`);
     log(`✓ sheet reachable: "${meta.properties.title}"`);
     log(`  tabs: ${meta.sheets.map((s) => s.properties.title).join(', ')}`);
+    log(`  writing to: ${await resolveTab(token)}`);
     return;
   }
 
@@ -214,6 +226,7 @@ async function main() {
     return;
   }
 
+  await resolveTab(token);
   const { index, rowCount } = await readIndex(token);
   await ensureHeaders(token, rowCount);
 
