@@ -136,6 +136,18 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   with a stubbed SDK: batching, concurrency, retry/backoff, crash recovery,
   graceful shutdown. NOT yet run against the real API — this box has no
   Anthropic credentials configured (no ANTHROPIC_API_KEY, no `ant` CLI).
+- generate.js built (stage 3), and it makes NO model calls at all. Every bullet
+  must map to a fact id, which makes tailoring a selection problem rather than a
+  writing problem, and selection is deterministic — so nothing can be invented
+  and there is nothing to bill. Two modes: pipeline (claims `shortlisted`,
+  through `generating`, out at `ready_for_review`) and `--job-id N` for manual
+  rebuilds, which deliberately leaves status alone.
+  Gates, all mechanical: fact coverage, ATS extraction via pdftotext, contiguous
+  section headings, one page, no Overfull \hbox, JD keyword coverage >= 70%, and
+  a ghostscript page-fill check that grows or shrinks content to reach the
+  bottom margin. Verified against 24 real postings spanning distinct role
+  families — 24/24 one page, every gate green — plus a scratch-database run of
+  the claim/requeue/exhaust/reclaim/SIGTERM paths.
 
 - notify.js posts a digest to Discord or Slack (format auto-detected from the
   webhook hostname; set JOBAGENT_WEBHOOK_URL). Reports discovered/shortlisted
@@ -165,7 +177,33 @@ Playwright with Chromium installed. Anthropic API for all model calls.
    placeholder, and every one of the 733 verdicts depends on it.
 2. Configure Anthropic credentials on this box.
 3. `node filter.js --once --limit 5` to sanity-check verdicts and per-job cost
-   before running the full 733-job backlog.
+   before running the full 733-job backlog. This is the only thing standing
+   between generate.js and a live end-to-end run: nothing is shortlisted yet,
+   so stage 3 has no queue to consume.
 4. Expand the watchlist beyond the 3 seed companies.
-5. Stage 3 (generate). Note: stage 3 will need to extend the `status` CHECK
-   constraint in schema.sql with its own states.
+5. Add generate.js to crontab-example, after filter.js.
+
+## Job status vocabulary (exact strings, do not invent new ones)
+new              - discovered, not yet filtered
+filtering        - claimed by filter.js
+shortlisted      - passed the filter, awaiting resume generation
+filtered_out     - failed the fit check, terminal
+filter_failed    - filter errored MAX_ATTEMPTS times, terminal
+generating       - claimed by generate.js, resume in progress
+ready_for_review - resume done, waiting on human approval
+applied          - human approved and submit.js confirmed the submission
+interview        - heard back, yes
+rejected         - heard back, no
+stale            - posting disappeared from the board
+
+The console status board reads these directly from Postgres.
+Renaming any of them breaks it silently.
+
+Two things this list must stay honest about:
+- It is 'applied', NOT 'submitted'. The CHECK constraint in schema.sql,
+  submit.js, and the applied_at / applied_method columns all use 'applied',
+  and submit.js writes all three in one statement.
+- There is no resume_failed. A resume that cannot be built stays 'shortlisted'
+  with resume_attempts at the cap, which drops it out of generate.js's claim
+  query without inventing a status; resume_error holds the reason. The job
+  really is still shortlisted — the human can apply to it by hand.

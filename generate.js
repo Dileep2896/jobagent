@@ -17,7 +17,18 @@
  *   2. ATS parse    — contact details and section headers survive pdftotext
  *   3. page count   — the resume is a single page
  *
- * Usage:  node generate.js --job-id N [--out DIR] [--keep-tex]
+ * Two modes:
+ *
+ *   PIPELINE (no --job-id) — a cron stage like filter.js. Claims jobs with
+ *   status='shortlisted', marks them 'generating', and lands them on
+ *   'ready_for_review'. A build that fails goes back to 'shortlisted' with
+ *   resume_attempts charged, so a wifi drop mid-run costs one retry, not a job.
+ *
+ *   MANUAL (--job-id N) — build one named job, leaving its status alone, for
+ *   testing and for rebuilding after master-facts.json changes.
+ *
+ * Usage:  node generate.js [--once] [--limit N] [--out DIR] [--keep-tex]
+ *         node generate.js --job-id N [--out DIR] [--keep-tex]
  *         node generate.js --job-id N --dry-run     (selection only, no LaTeX)
  */
 
@@ -845,27 +856,16 @@ function compile(texPath, outDir) {
   }
 }
 
-async function main() {
-  const args = process.argv.slice(2);
-  const idFlag = args.indexOf('--job-id');
-  if (idFlag < 0) throw new Error('--job-id is required');
-  const jobId = Number(args[idFlag + 1]);
-  if (!Number.isInteger(jobId)) throw new Error('--job-id must be an integer');
-  const dryRun = args.includes('--dry-run');
-  const keepTex = args.includes('--keep-tex');
-  const outDir = args.includes('--out') ? args[args.indexOf('--out') + 1] : OUT_DIR;
-
-  if (!fs.existsSync(FACTS_PATH)) throw new Error(`${FACTS_PATH} not found`);
-  const facts = JSON.parse(fs.readFileSync(FACTS_PATH, 'utf8'));
-
-  const { rows } = await pool.query(
-    `SELECT j.id, j.title, j.description, j.location, j.url, c.name AS company
-       FROM jobs j JOIN companies c ON c.id = j.company_id WHERE j.id = $1`,
-    [jobId]
-  );
-  if (rows.length === 0) throw new Error(`no job with id ${jobId}`);
-  const job = rows[0];
-
+/**
+ * Build one resume, end to end. Returns the artefact paths and gate results, or
+ * throws with a human-readable reason.
+ *
+ * Deliberately does NO database writes. The caller owns the status transition,
+ * because manual and pipeline mode want different ones: rebuilding an already
+ * applied job by hand must not walk it back to ready_for_review.
+ */
+async function buildResume(job, facts, opts) {
+  const { outDir, keepTex, dryRun } = opts;
   const selection = selectContent(facts, job);
   const chosenFacts = selection.roles.flatMap((r) => r.bullets.map((b) => b.fact));
 
@@ -1010,11 +1010,6 @@ async function main() {
     }
   }
 
-  await pool.query(
-    `UPDATE jobs SET resume_path = $1, resume_built_at = now(), updated_at = now() WHERE id = $2`,
-    [pdfPath, job.id]
-  );
-
   // Some application portals reject PDFs outright. pandoc gives an editable
   // Word version from a Markdown mirror of the same selection — same facts,
   // same order, no second source of truth.
@@ -1037,7 +1032,209 @@ async function main() {
     log(`  JD terms owned but not on the page: ${result.coverage.missing.join(', ')}`);
   }
   if (haveDocx) log(`  also wrote ${path.basename(docxPath)} (editable, for portals that reject PDFs)`);
+
+  return { pdfPath, docxPath: haveDocx ? docxPath : null, result, sel };
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline mode
+//
+// Same shape as filter.js: claim with FOR UPDATE SKIP LOCKED, commit one job at
+// a time, release what was not reached on shutdown. This box drops wifi, so any
+// stage that cannot be killed mid-run and restarted is a stage that will one day
+// need hand-repair.
+// ---------------------------------------------------------------------------
+const STATUS = {
+  QUEUED: 'shortlisted',
+  CLAIMED: 'generating',
+  DONE: 'ready_for_review',
+};
+const MAX_RESUME_ATTEMPTS = 3;
+const STALE_CLAIM_MINUTES = 30;
+const IDLE_SLEEP_MS = 60000;
+// Serial, and small. Each resume runs up to 16 pdflatex compilations on a 4-core
+// Skylake box; a large batch buys nothing and just lengthens the window in which
+// a crash strands claims.
+const BATCH_SIZE = 5;
+
+let shuttingDown = false;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const JOB_COLUMNS = `j.id, j.title, j.description, j.location, j.url,
+                     j.resume_attempts AS attempts, c.name AS company`;
+
+/** Claims stranded by a crashed run, swept at startup. */
+async function reclaimStaleClaims() {
+  const { rowCount } = await pool.query(
+    `UPDATE jobs SET status = $1, updated_at = now()
+      WHERE status = $2 AND updated_at < now() - ($3 || ' minutes')::interval`,
+    [STATUS.QUEUED, STATUS.CLAIMED, String(STALE_CLAIM_MINUTES)]
+  );
+  if (rowCount > 0) log(`reclaimed ${rowCount} stale claim(s) from a previous run`);
+}
+
+async function claimBatch(limit) {
+  const { rows } = await pool.query(
+    `WITH claimed AS (
+       SELECT id FROM jobs
+        WHERE status = $1 AND resume_attempts < $2
+        ORDER BY id
+          FOR UPDATE SKIP LOCKED
+        LIMIT $3
+     )
+     UPDATE jobs j SET status = $4, updated_at = now()
+       FROM claimed WHERE j.id = claimed.id
+     RETURNING j.id`,
+    [STATUS.QUEUED, MAX_RESUME_ATTEMPTS, limit, STATUS.CLAIMED]
+  );
+  if (rows.length === 0) return [];
+
+  const { rows: jobs } = await pool.query(
+    `SELECT ${JOB_COLUMNS} FROM jobs j JOIN companies c ON c.id = j.company_id
+      WHERE j.id = ANY($1) ORDER BY j.id`,
+    [rows.map((r) => r.id)]
+  );
+  return jobs;
+}
+
+/** One resume committed. Single statement — the unit of resumability. */
+async function recordBuilt(jobId, pdfPath) {
+  await pool.query(
+    `UPDATE jobs
+        SET status = $1, resume_path = $2, resume_built_at = now(),
+            resume_error = NULL, updated_at = now()
+      WHERE id = $3`,
+    [STATUS.DONE, pdfPath, jobId]
+  );
+}
+
+/**
+ * Put a job back on the queue and charge it an attempt.
+ *
+ * There is no terminal 'resume_failed' status on purpose. Once resume_attempts
+ * reaches the cap the claim query stops selecting the row, so it leaves the queue
+ * without a status invented for the occasion, and resume_error says why. A job
+ * parked this way is still shortlisted, which is true: the human can still apply
+ * to it by hand.
+ */
+async function releaseJob(jobId, reason) {
+  await pool.query(
+    `UPDATE jobs
+        SET status = $1, resume_attempts = resume_attempts + 1,
+            resume_error = $2, updated_at = now()
+      WHERE id = $3`,
+    [STATUS.QUEUED, reason ? reason.slice(0, 500) : null, jobId]
+  );
+}
+
+/** Hand back claims we never got to, so a restart picks them up immediately. */
+async function releaseClaims(ids) {
+  if (!ids.length) return;
+  await pool.query(
+    `UPDATE jobs SET status = $1, updated_at = now() WHERE id = ANY($2) AND status = $3`,
+    [STATUS.QUEUED, ids, STATUS.CLAIMED]
+  );
+}
+
+async function runPipeline(facts, opts) {
+  const { limit, once, outDir, keepTex } = opts;
+  await reclaimStaleClaims();
+
+  let processed = 0;
+  const totals = { built: 0, failed: 0, exhausted: 0 };
+
+  while (!shuttingDown) {
+    const remaining = limit - processed;
+    if (remaining <= 0) break;
+
+    const jobs = await claimBatch(Math.min(BATCH_SIZE, remaining));
+    if (jobs.length === 0) {
+      if (once) {
+        log(`no jobs with status=${STATUS.QUEUED}; done`);
+        break;
+      }
+      log(`no jobs with status=${STATUS.QUEUED}; sleeping ${IDLE_SLEEP_MS / 1000}s`);
+      await sleep(IDLE_SLEEP_MS);
+      continue;
+    }
+
+    log(`claimed batch of ${jobs.length}`);
+    const queue = [...jobs];
+    while (queue.length && !shuttingDown) {
+      const job = queue.shift();
+      try {
+        const { pdfPath } = await buildResume(job, facts, { outDir, keepTex, dryRun: false });
+        await recordBuilt(job.id, pdfPath);
+        totals.built += 1;
+        log(`job ${job.id} -> ${STATUS.DONE}`);
+      } catch (err) {
+        const attempt = job.attempts + 1;
+        await releaseJob(job.id, err.message);
+        totals.failed += 1;
+        if (attempt >= MAX_RESUME_ATTEMPTS) {
+          totals.exhausted += 1;
+          log(`job ${job.id} FAILED, attempts exhausted (${attempt}/${MAX_RESUME_ATTEMPTS}): ${err.message}`);
+        } else {
+          log(`job ${job.id} failed (attempt ${attempt}/${MAX_RESUME_ATTEMPTS}), requeued: ${err.message}`);
+        }
+      }
+      processed += 1;
+    }
+
+    if (queue.length) {
+      await releaseClaims(queue.map((j) => j.id));
+      log(`released ${queue.length} unprocessed claim(s)`);
+    }
+    if (once) break;
+  }
+
+  log('run summary:', JSON.stringify(totals));
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const keepTex = args.includes('--keep-tex');
+  const dryRun = args.includes('--dry-run');
+  const outDir = args.includes('--out') ? args[args.indexOf('--out') + 1] : OUT_DIR;
+
+  if (!fs.existsSync(FACTS_PATH)) throw new Error(`${FACTS_PATH} not found`);
+  const facts = JSON.parse(fs.readFileSync(FACTS_PATH, 'utf8'));
+
+  const idFlag = args.indexOf('--job-id');
+  if (idFlag >= 0) {
+    // Manual mode: build one named job and touch nothing else. Used for testing
+    // and for rebuilding a resume after the facts change, so it deliberately
+    // does not move the job's status.
+    const jobId = Number(args[idFlag + 1]);
+    if (!Number.isInteger(jobId)) throw new Error('--job-id must be an integer');
+    const { rows } = await pool.query(
+      `SELECT ${JOB_COLUMNS} FROM jobs j JOIN companies c ON c.id = j.company_id WHERE j.id = $1`,
+      [jobId]
+    );
+    if (rows.length === 0) throw new Error(`no job with id ${jobId}`);
+    const built = await buildResume(rows[0], facts, { outDir, keepTex, dryRun });
+    if (built) {
+      await pool.query(
+        `UPDATE jobs SET resume_path = $1, resume_built_at = now(), updated_at = now() WHERE id = $2`,
+        [built.pdfPath, jobId]
+      );
+    }
+    return;
+  }
+
+  const limitFlag = args.indexOf('--limit');
+  const limit = limitFlag >= 0 ? Number(args[limitFlag + 1]) : Infinity;
+  if (limitFlag >= 0 && !Number.isFinite(limit)) throw new Error('--limit requires a number');
+  await runPipeline(facts, { limit, once: args.includes('--once'), outDir, keepTex });
+}
+
+function onSignal(sig) {
+  if (shuttingDown) process.exit(130);
+  shuttingDown = true;
+  log(`${sig} received; finishing the current resume then releasing claims`);
+}
+process.on('SIGINT', () => onSignal('SIGINT'));
+process.on('SIGTERM', () => onSignal('SIGTERM'));
 
 main()
   .catch((e) => {

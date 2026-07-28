@@ -47,13 +47,20 @@ CREATE TABLE IF NOT EXISTS jobs (
   url            text,
   description    text,               -- plain-text JD, as fed to the filter
 
+  -- 'applied', not 'submitted': applied_at and applied_method below already
+  -- name the event, and submit.js writes all three together.
   status         text NOT NULL DEFAULT 'new'
                  CHECK (status IN ('new', 'filtering', 'shortlisted',
                                    'filtered_out', 'filter_failed',
-                                   'ready_for_review', 'applied',
-                                   'interview', 'rejected')),
+                                   'generating', 'ready_for_review', 'applied',
+                                   'interview', 'rejected', 'stale')),
   filter_reason  text,
   filter_attempts integer NOT NULL DEFAULT 0,
+  -- generate.js's own attempt counter, mirroring filter_attempts. A resume that
+  -- cannot be built (a gate that never passes for this JD) must stop retrying
+  -- forever, and it must not consume the filter's budget to do so.
+  resume_attempts integer NOT NULL DEFAULT 0,
+  resume_error   text,
 
   first_seen_at  timestamptz NOT NULL DEFAULT now(),
   updated_at     timestamptz NOT NULL DEFAULT now(),
@@ -69,6 +76,13 @@ CREATE INDEX IF NOT EXISTS jobs_queue_idx
 -- Startup sweep for claims stranded by a crashed worker.
 CREATE INDEX IF NOT EXISTS jobs_claimed_idx
   ON jobs (updated_at) WHERE status = 'filtering';
+
+-- generate.js claims with: WHERE status='shortlisted' AND resume_attempts < N.
+CREATE INDEX IF NOT EXISTS jobs_generate_queue_idx
+  ON jobs (id) WHERE status = 'shortlisted';
+
+CREATE INDEX IF NOT EXISTS jobs_generating_idx
+  ON jobs (updated_at) WHERE status = 'generating';
 
 -- Review queue / reporting.
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);
@@ -102,6 +116,20 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_built_at      timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applied_at           timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applied_method       text
   CHECK (applied_method IS NULL OR applied_method IN ('agent', 'manual'));
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resume_error    text;
+
+-- The status vocabulary grew with stage 3. ADD COLUMN IF NOT EXISTS cannot widen
+-- an existing CHECK, so the constraint is dropped and rebuilt; it must match the
+-- CREATE TABLE above exactly. Rebuilding validates every existing row, which is
+-- the point -- a status this file no longer knows about should fail loudly here
+-- rather than silently at 3am in cron.
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_status_check;
+ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
+  CHECK (status IN ('new', 'filtering', 'shortlisted',
+                    'filtered_out', 'filter_failed',
+                    'generating', 'ready_for_review', 'applied',
+                    'interview', 'rejected', 'stale'));
 
 -- Rows still needing a push to the tracking spreadsheet.
 -- Outcome tracking. outcome_evidence keeps the quoted line the classification
