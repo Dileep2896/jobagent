@@ -1,19 +1,25 @@
-# jobagent — install with:  crontab crontab-example
+# jobagent — install with:  crontab /home/dileep/jobagent/crontab-example
 # Verify with:              crontab -l
 # Remove with:              crontab -r
 #
-# Cron is used rather than a systemd --user timer because linger is disabled on
-# this box: user services would stop at logout. Cron runs regardless.
-# A systemd timer is nicer (proper logging, restart policy) but needs
-#   sudo loginctl enable-linger dileep
-# or a system-level unit.
+# Cron rather than a systemd --user timer because linger is disabled on this
+# box, so user services would stop at logout. A systemd timer is nicer (proper
+# logging, restart policy) but needs:  sudo loginctl enable-linger dileep
+#
+# Absolute paths throughout: cron starts in $HOME with a minimal environment,
+# so a bare ./run-daily.sh would not resolve. The script cd's to its own
+# directory internally and loads .env itself.
+#
+# Logs land in ~/jobagent-logs (14-day retention, pruned by the script).
+# Failures are also reported to the #job-errors Discord channel.
 
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# Full pass twice a day. run-daily.sh takes a lock, so an overrun is harmless.
-0 7,19 * * *  ./run-daily.sh >/dev/null 2>&1
+# Full pass, morning and evening. run-daily.sh takes an flock, so if one run
+# overruns into the next the second exits immediately instead of double-claiming.
+0 7,19 * * *  /home/dileep/jobagent/run-daily.sh >/dev/null 2>&1
 
-# Discovery-only pass at midday to catch new postings without spending on the
-# filter. Swap to a full pass once you are happy with the scoring.
-0 13 * * *    cd /home/dileep/jobagent && ./run-daily.sh --no-filter >/dev/null 2>&1
+# Midday: discovery and notifications only, no spend. Switch this to a full
+# pass once you are happy the A-F scoring behaves.
+0 13 * * *    /home/dileep/jobagent/run-daily.sh --no-filter >/dev/null 2>&1
