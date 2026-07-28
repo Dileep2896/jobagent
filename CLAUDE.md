@@ -22,6 +22,16 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 7. upload       - resume PDF to Google Drive, so anything the agent cannot
                   submit can be applied to manually
 
+## Known limitations (2026-07-28)
+- Lever's "Current location" is a geocoded autocomplete: the visible input is
+  cosmetic and the real value lives in a hidden `selectedLocation` field set
+  only by clicking a suggestion. The suggestion dropdown returns nothing in
+  headless Chromium, so this field cannot be filled programmatically and the
+  submit audit correctly refuses. Lever applications need a human for it.
+- Job-specific questions ("Are you located in the NYC area?", "willing to come
+  in 3 days/week?") are deliberately never guessed. They are real decisions,
+  and the audit refuses until answered.
+
 ## Architecture decisions (2026-07-28)
 - Agents are Node pipeline stages, like discover.js/filter.js: one status per
   job, resumable, cron-scheduled. Not Claude Code subagents (they don't run
