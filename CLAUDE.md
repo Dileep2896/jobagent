@@ -22,7 +22,33 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 7. upload       - resume PDF to Google Drive, so anything the agent cannot
                   submit can be applied to manually
 
+## Auto-submit (2026-07-28)
+- run-daily.sh CAN send applications, but only with AUTO_SUBMIT=1. Default off,
+  so an unmodified cron entry never sends anything. Caps: MAX_SUBMIT=3 per run,
+  MAX_PER_COMPANY=2 — 40 applications landing at one employer in a day is a
+  signal about the candidate, and not a good one.
+- `submit.js --auto` replaces the HUMAN APPROVAL and nothing else. The audit
+  becomes the approver: if every required field is populated and every question
+  already had a pre-written answer, the application is complete by inspection.
+  An approvals row is still written with approved_by='auto', so the trail is
+  identical to a hand-approved send. Every other guard stands, --confirm is
+  still required, and anything the audit cannot fully satisfy stops at
+  ready_for_review for a human.
+- GUARD 6 exists because guard 5 can pass VACUOUSLY. "No required field is
+  empty" is trivially true on a page with no form, so submit.js now also
+  requires that a resume upload was accepted and >= 3 fields were filled.
+  This was not hypothetical — see the Greenhouse redirect below.
+
 ## Known limitations (2026-07-28)
+- STRIPE POSTINGS CANNOT BE APPLIED TO PROGRAMMATICALLY YET, and that is 533 of
+  the 734 jobs on the watchlist. job-boards.greenhouse.io/stripe/jobs/<id> 302s
+  to stripe.com/jobs/search?gh_jid=<id>, which is a description page with an
+  "Apply for this role" button and no form anywhere on it. applyUrlFor() in
+  lib/form-fill.js rebuilds exactly that URL, so fillForm fills 0 fields and the
+  old audit passed on a page it could never have applied from. Guard 6 now
+  refuses it. Reaching the real form means following the Apply button into
+  whatever Stripe hosts behind it; until that is built, AUTO_SUBMIT=1 is safe to
+  set but will simply refuse every Stripe job.
 - Lever's "Current location" is a geocoded autocomplete: the visible input is
   cosmetic and the real value lives in a hidden `selectedLocation` field set
   only by clicking a suggestion. The suggestion dropdown returns nothing in
@@ -78,9 +104,12 @@ Playwright with Chromium installed. Anthropic API for all model calls.
   MASTER_RESUME.md and is untouched.
 - Tracking sheet "Job Applications Tracker":
   1aAGCe9Gvi8J4WT3blsAj1mRFCrNPS9UQFk8A6ocZHTM  (inside that folder)
-  APPLIED JOBS ONLY — one row per real submission (applied_at IS NOT NULL),
-  then tracking the outcome. Shortlisted-but-not-applied jobs stay in Discord
-  and Postgres. Postgres remains the source of truth.
+  Every job that got a TAILORED RESUME, not only applied ones (widened
+  2026-07-28). The old applied-only rule left a per-job PDF sitting in Drive
+  with no row pointing at it, which defeats the reason drive-upload.js exists:
+  the human applies by hand to everything the agent cannot submit. 'Applied'
+  and 'How' stay blank until a real submission, so the two are still
+  distinguishable at a glance. Postgres remains the source of truth.
   sheets-sync.js reconciles by Job ID in column A, not by remembered row
   number, so sorting or deleting rows by hand cannot corrupt the mapping.
   Needs the SAME service account as drive-upload.js, plus the Sheets API

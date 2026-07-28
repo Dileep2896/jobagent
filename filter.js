@@ -23,9 +23,11 @@
  *   3. No prompt caching: the system prompt is ~860 tokens and Haiku needs a
  *      4096-token cacheable prefix, so a breakpoint would be a silent no-op.
  *
- * Usage:  node filter.js [--once] [--limit N] [--batch]
+ * Usage:  node filter.js [--once] [--limit N] [--batch] [--no-wait]
  *         node filter.js --prefilter-dry-run     (report only, writes nothing)
  *         node filter.js --prefilter-only        (free pass, 0 API calls)
+ *
+ * --no-wait is for cron: submit the batch and exit, let the next run harvest it.
  */
 
 const fs = require('fs');
@@ -831,8 +833,17 @@ async function resumeBatches() {
   return counts;
 }
 
-/** Submit one claimed batch, wait for it, and commit every verdict. */
-async function processBatchViaAPI(jobs) {
+/**
+ * Submit one claimed batch and commit every verdict.
+ *
+ * With noWait, it submits and returns instead of polling. A batch can take
+ * hours; blocking on it inside a twice-daily cron would stall generate, prefill
+ * and notify behind the slowest thing in the pipeline. Instead the jobs stay
+ * claimed with their filter_batch_id and the NEXT run harvests them through
+ * resumeBatches() before submitting anything new. Verdicts land ~12h later,
+ * which matters to nothing here.
+ */
+async function processBatchViaAPI(jobs, noWait) {
   const counts = {};
 
   // Pre-filtered jobs never reach the API, so they are settled here and excluded
@@ -859,6 +870,10 @@ async function processBatchViaAPI(jobs) {
   await attachBatch(batch.id, remaining.map((j) => j.id));
   log(`batch ${batch.id} submitted with ${remaining.length} job(s)`);
 
+  if (noWait) {
+    log(`not waiting — the next run will harvest batch ${batch.id}`);
+    return counts;
+  }
   if (await awaitBatch(batch.id)) await harvestBatch(batch.id, counts);
   return counts;
 }
@@ -936,6 +951,7 @@ async function main() {
   const args = process.argv.slice(2);
   const once = args.includes('--once');
   const useBatch = args.includes('--batch');
+  const noWait = args.includes('--no-wait');
   const limitFlag = args.indexOf('--limit');
   const limit = limitFlag >= 0 ? Number(args[limitFlag + 1]) : Infinity;
 
@@ -976,7 +992,7 @@ async function main() {
     }
 
     log(`claimed batch of ${jobs.length}${useBatch ? ' (batch API)' : ''}`);
-    add(useBatch ? await processBatchViaAPI(jobs) : await processBatch(jobs));
+    add(useBatch ? await processBatchViaAPI(jobs, noWait) : await processBatch(jobs));
     processed += jobs.length;
 
     if (once) break;

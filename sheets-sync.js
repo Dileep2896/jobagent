@@ -198,18 +198,24 @@ async function main() {
     return;
   }
 
-  // Applied jobs only. The sheet is an application log, not a pipeline mirror:
-  // shortlisted-but-not-applied jobs live in Discord and Postgres, and putting
-  // them here would bury the rows that represent real submissions.
-  // applied_at is the truth test — status then tracks the outcome
-  // (applied -> interview / rejected).
+  // Every job that got a TAILORED RESUME, not only the ones applied to.
+  //
+  // This was applied-only, on the reasoning that the sheet is an application log
+  // and shortlisted rows would bury the real submissions. That holds right up
+  // until a resume exists: at that point there is a per-job artefact in Drive
+  // that the human may want to send by hand — which is the entire reason
+  // drive-upload.js exists, since the agent cannot submit every Lever posting.
+  // A resume with no row is a document nobody can find.
+  //
+  // Applied rows are still the ones that matter, and 'Applied' / 'How' stay
+  // blank until they are, so the two are still distinguishable at a glance.
   const { rows: jobs } = await pool.query(
     `SELECT j.id, j.title, j.location, j.url, j.status, j.filter_score, j.filter_reason,
             j.first_seen_at, j.applied_at, j.applied_method, j.resume_drive_url,
             c.name AS company
        FROM jobs j
        JOIN companies c ON c.id = j.company_id
-      WHERE j.applied_at IS NOT NULL
+      WHERE (j.applied_at IS NOT NULL OR j.resume_path IS NOT NULL)
         ${all ? '' : 'AND (j.sheet_synced_at IS NULL OR j.updated_at > j.sheet_synced_at)'}
       ORDER BY j.id`
   );

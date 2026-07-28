@@ -13,15 +13,29 @@
  *   3. The resume on disk is the same one that was approved.
  *   4. The job has not already been applied to (applied_at is null).
  *   5. After filling, NO required control on the live form is still empty.
+ *   6. A form was actually found: a resume upload was accepted and at least
+ *      MIN_FILLED_FIELDS controls were populated. Guard 5 alone is trivially
+ *      satisfied by a page with no form on it.
  *
  * Guard 5 matters as much as the approval: an approved-but-incomplete
  * application is just as damaging as a wrong one, and the board's own scripts
  * can clear a field after we set it. The audit re-reads the DOM rather than
  * trusting what the fill step reported.
  *
+ * --auto replaces guard 2 ONLY, and nothing else. The audit becomes the
+ * approver: if every required field is populated and every question already had
+ * a pre-written answer, the application is complete by inspection and a human
+ * ticking a box adds no information. An approval row is still written, stamped
+ * approved_by='auto', so the trail is identical to a hand-approved submission.
+ * Guards 1, 3, 4 and 5 are untouched, --confirm is still required to send, and
+ * anything the audit cannot fully satisfy still stops at ready_for_review for a
+ * human. That covers every Lever posting (the location field cannot be filled
+ * headlessly) and anything with a job-specific question.
+ *
  * Approve with:  node approve.js --job-id N
  * Submit with:   node submit.js --job-id N            (dry run by default)
  *                node submit.js --job-id N --confirm  (actually submits)
+ *                node submit.js --job-id N --auto --confirm   (no human step)
  */
 
 const fs = require('fs');
@@ -33,6 +47,9 @@ const { fillForm, auditRequired, applyUrlFor } = require('./lib/form-fill');
 const FACTS_PATH = process.env.MASTER_FACTS || 'master-facts.json';
 const SHOT_DIR = process.env.PREFILL_SHOTS || path.join(__dirname, 'build', 'prefill');
 const NAV_TIMEOUT_MS = 60000;
+// A real application form takes a resume plus at least a name and an email.
+// Below this we are not looking at an application form. See guard 6.
+const MIN_FILLED_FIELDS = 3;
 const SUBMIT_RE = /submit|send application|apply now|finish/i;
 
 const pool = new Pool({
@@ -52,6 +69,8 @@ async function main() {
   // Dry run is the DEFAULT. Sending an application must be something you typed
   // on purpose, not something you got by forgetting a flag.
   const confirm = args.includes('--confirm');
+  // Replaces the human approval, and only that. See the header.
+  const auto = args.includes('--auto');
 
   const facts = JSON.parse(fs.readFileSync(FACTS_PATH, 'utf8'));
 
@@ -76,14 +95,19 @@ async function main() {
   if (job.status !== 'ready_for_review') {
     throw new Error(`job ${jobId} is '${job.status}', expected 'ready_for_review' — run prefill.js first`);
   }
-  if (!job.approved_at) {
-    throw new Error(`job ${jobId} has no approval — run: node approve.js --job-id ${jobId}`);
+  // In --auto the approval is granted later, by the audit, so these three
+  // approval guards do not apply. An ALREADY-CONSUMED approval still blocks,
+  // because that means this job was submitted once before.
+  if (!auto) {
+    if (!job.approved_at) {
+      throw new Error(`job ${jobId} has no approval — run: node approve.js --job-id ${jobId}`);
+    }
+    if (new Date(job.expires_at) < new Date()) {
+      throw new Error(`approval for job ${jobId} expired at ${job.expires_at.toISOString()} — re-approve to continue`);
+    }
   }
   if (job.consumed_at) {
     throw new Error(`approval for job ${jobId} was already used at ${job.consumed_at.toISOString()}`);
-  }
-  if (new Date(job.expires_at) < new Date()) {
-    throw new Error(`approval for job ${jobId} expired at ${job.expires_at.toISOString()} — re-approve to continue`);
   }
   if (job.approved_resume && job.resume_path && job.approved_resume !== job.resume_path) {
     throw new Error(`the resume changed since approval — approved ${job.approved_resume}, now ${job.resume_path}`);
@@ -94,7 +118,9 @@ async function main() {
 
   const applyUrl = applyUrlFor(job);
   log(`job ${job.id}: ${job.company} — ${job.title}`);
-  log(`approved by ${job.approved_by} at ${job.approved_at.toISOString()}`);
+  log(auto && !job.approved_at
+    ? 'approval: --auto (granted by the pre-flight audit, if it passes)'
+    : `approved by ${job.approved_by} at ${job.approved_at.toISOString()}`);
   log(confirm ? 'MODE: LIVE SUBMIT' : 'MODE: dry run (pass --confirm to actually submit)');
 
   fs.mkdirSync(SHOT_DIR, { recursive: true });
@@ -149,7 +175,45 @@ async function main() {
       throw new Error(`${res.unanswered.length} unanswered question(s) — fill screening_answers in master-facts.json`);
     }
 
-    log('pre-flight audit passed: every required field is populated');
+    // ---- Guard 6: the audit must not pass VACUOUSLY ----------------------
+    //
+    // "No required field is empty" is trivially true on a page with no form at
+    // all, and that is not a hypothetical: job-boards.greenhouse.io 302s Stripe
+    // postings back to stripe.com/jobs, which is a description page with an
+    // "Apply for this role" button and no inputs. fillForm reported 0 filled,
+    // 0 unanswered, and the audit passed — on a page it could not have applied
+    // from. Without this, --auto would go hunting for a submit button there.
+    //
+    // Every genuine application form takes a resume, so that is the test. The
+    // field floor is a second signal: name and email at minimum accompany it.
+    const attachedResume = res.filled.some((f) => /^resume\b/.test(f));
+    if (!attachedResume || res.filled.length < MIN_FILLED_FIELDS) {
+      log('REFUSING TO SUBMIT — this does not look like an application form:');
+      log(`   ✗ ${res.filled.length} field(s) filled, resume attached: ${attachedResume}`);
+      log(`   ✗ URL: ${applyUrl}`);
+      log(`   screenshot: ${before}`);
+      throw new Error(
+        `form not found at ${applyUrl} — ${res.filled.length} field(s) filled` +
+        `${attachedResume ? '' : ', no resume upload control'}. Refusing to submit into a page with no form.`
+      );
+    }
+
+    log(`pre-flight audit passed: ${res.filled.length} field(s) filled, every required field populated`);
+
+    // The audit passed, so in --auto this is where approval is granted. Written
+    // before the click and with the exact resume that was audited, so the record
+    // says what was actually sent rather than what was intended.
+    if (auto && confirm) {
+      await pool.query(
+        `INSERT INTO approvals (job_id, approved_by, resume_path, note, expires_at)
+         VALUES ($1, 'auto', $2, $3, now() + interval '1 hour')
+         ON CONFLICT (job_id) DO UPDATE
+            SET approved_at = now(), approved_by = 'auto', resume_path = EXCLUDED.resume_path,
+                note = EXCLUDED.note, expires_at = EXCLUDED.expires_at, consumed_at = NULL`,
+        [job.id, job.resume_path, `auto-approved: audit clean, 0 unanswered questions, ${res.filled.length} field(s) filled`]
+      );
+      log('approval recorded as approved_by=auto');
+    }
 
     if (!confirm) {
       log(`dry run complete — nothing submitted. Screenshot: ${before}`);

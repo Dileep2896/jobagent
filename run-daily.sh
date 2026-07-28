@@ -4,13 +4,18 @@
 # stage is idempotent and resumable, which is the whole reason the pipeline is
 # built around a status column.
 #
-# It NEVER submits an application. submit.js is not called here and never will
-# be: submission requires `node approve.js --job-id N` typed by a human,
-# followed by `node submit.js --job-id N --confirm`.
+# SUBMISSION. This script CAN send real applications, but only when AUTO_SUBMIT=1
+# is set explicitly — the default is still off, so an unmodified cron entry never
+# sends anything. Even switched on it only submits what the pre-flight audit can
+# fully satisfy: every required field populated and every question already
+# answered from master-facts.json. Anything else stops at ready_for_review and
+# waits for a human, which is every Lever posting (the location field cannot be
+# filled headlessly) and anything with a job-specific question.
 #
-# Usage:  ./run-daily.sh              full pass
+# Usage:  ./run-daily.sh              full pass, no submissions
 #         ./run-daily.sh --no-filter  skip the paid stage
 #         MAX_FILTER=50 ./run-daily.sh
+#         AUTO_SUBMIT=1 ./run-daily.sh   sends real applications
 set -uo pipefail
 
 cd "$(dirname "$0")"
@@ -19,6 +24,11 @@ cd "$(dirname "$0")"
 MAX_FILTER="${MAX_FILTER:-100}"   # jobs scored per run; caps spend
 MAX_GENERATE="${MAX_GENERATE:-10}" # resumes built per run
 MAX_PREFILL="${MAX_PREFILL:-5}"    # forms opened per run (~1 min each)
+AUTO_SUBMIT="${AUTO_SUBMIT:-0}"    # 1 = send applications the audit fully clears
+MAX_SUBMIT="${MAX_SUBMIT:-3}"      # applications per run, hard ceiling
+MAX_PER_COMPANY="${MAX_PER_COMPANY:-2}" # per company per run: 40 applications
+                                   # landing at one employer in a day is a signal
+                                   # about the candidate, and not a good one
 LOG_DIR="${LOG_DIR:-$HOME/jobagent-logs}"
 LOCK="/tmp/jobagent.lock"
 
@@ -54,8 +64,12 @@ if [ "${1:-}" = "--no-filter" ]; then
 elif [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   say "filter — skipped (ANTHROPIC_API_KEY not set)"
 else
-  say "filter (max $MAX_FILTER jobs)"
-  node filter.js --once --limit "$MAX_FILTER" || echo "filter failed — unscored jobs stay queued"
+  # --batch halves the price; --no-wait submits and exits rather than blocking
+  # generate/prefill/notify behind a batch that may run for hours. The NEXT run
+  # harvests it before submitting a new one.
+  say "filter (max $MAX_FILTER jobs, batch API)"
+  node filter.js --once --limit "$MAX_FILTER" --batch --no-wait \
+    || echo "filter failed — unscored jobs stay queued"
 fi
 
 # --- 3. build resumes for the best unbuilt shortlisted jobs -----------------
@@ -90,11 +104,43 @@ psql -d jobagent -tAc "
   node prefill.js --job-id "$id" || echo "  prefill failed for job $id"
 done
 
-# --- 6. log applied jobs to the tracker -------------------------------------
+# --- 6. submit, but ONLY what the audit fully clears -------------------------
+# Off unless AUTO_SUBMIT=1. submit.js --auto lets the pre-flight audit stand in
+# for the human approval and nothing else: it still refuses on a blank required
+# field, an unanswered question, a missing resume, a job not at
+# ready_for_review, or one already applied to. A refusal is not an error here —
+# it is the job staying queued for a human, which is the designed outcome for
+# every Lever posting and anything with a custom question.
+if [ "$AUTO_SUBMIT" = "1" ]; then
+  say "submit (max $MAX_SUBMIT, max $MAX_PER_COMPANY per company)"
+  psql -d jobagent -tAc "
+    SELECT id FROM (
+      SELECT j.id,
+             row_number() OVER (PARTITION BY j.company_id
+                                ORDER BY j.filter_score DESC NULLS LAST, j.id) AS rn
+        FROM jobs j
+       WHERE j.status='ready_for_review'
+         AND j.applied_at IS NULL
+         AND j.resume_path IS NOT NULL
+    ) t WHERE rn <= $MAX_PER_COMPANY
+    ORDER BY id
+    LIMIT $MAX_SUBMIT" | while read -r id; do
+    [ -n "$id" ] || continue
+    if node submit.js --job-id "$id" --auto --confirm; then
+      echo "  job $id submitted"
+    else
+      echo "  job $id not submitted — stays at ready_for_review for you"
+    fi
+  done
+else
+  say "submit — skipped (AUTO_SUBMIT not set to 1)"
+fi
+
+# --- 7. log jobs to the tracker ---------------------------------------------
 say "sheets"
 node sheets-sync.js || echo "sheets sync failed — retries next run"
 
-# --- 7. tell the human ------------------------------------------------------
+# --- 8. tell the human ------------------------------------------------------
 say "notify"
 node notify.js || echo "notify failed — nothing marked sent, retries next run"
 
