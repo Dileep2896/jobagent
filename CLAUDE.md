@@ -30,9 +30,25 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 - Respect robots.txt and ToS. Public board APIs only, no LinkedIn scraping.
 
 ## Current state
-- schema.sql applied (companies, jobs)
-- discover.js works, seeded with 2 test companies
-- Nothing downstream built yet
+- Git repo initialised. Everything below is committed — an earlier copy of
+  schema.sql and discover.js was lost because nothing was tracked.
+- schema.sql applied to the `jobagent` db (companies, jobs). Re-runnable.
+- discover.js works: greenhouse/lever/ashby adapters, retry+backoff, upsert
+  deduped on (company_id, external_id). The upsert never touches `status`,
+  so re-running cannot undo a filter verdict.
+- Watchlist seeded with 3 companies, one per board type (Stripe/greenhouse,
+  Match Group/lever, Ramp/ashby). 733 jobs discovered, all status='new'.
+- filter.js built (stage 2). Verified end-to-end against a scratch database
+  with a stubbed SDK: batching, concurrency, retry/backoff, crash recovery,
+  graceful shutdown. NOT yet run against the real API — this box has no
+  Anthropic credentials configured (no ANTHROPIC_API_KEY, no `ant` CLI).
 
 ## Next
-Build out the watchlist, then stage 2.
+1. Replace CANDIDATE_PROFILE in filter.js — it is a placeholder and every
+   verdict depends on it.
+2. Configure Anthropic credentials on this box.
+3. `node filter.js --once --limit 5` to sanity-check verdicts and per-job cost
+   before running the full 733-job backlog.
+4. Expand the watchlist beyond the 3 seed companies.
+5. Stage 3 (generate). Note: stage 3 will need to extend the `status` CHECK
+   constraint in schema.sql with its own states.
