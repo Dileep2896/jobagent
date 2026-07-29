@@ -212,7 +212,9 @@ Playwright with Chromium installed. Anthropic API for all model calls.
 - master-facts.json BUILT from MASTER_RESUME.md in Drive (Job Applications/
   Master Resume). 24 verified facts, 6 roles, 10 projects, 2 patents, 2
   publications. Validates clean. Gitignored — personal history + attestations.
-  Work auth transcribed: F-1 OPT (STEM), will need H-1B sponsorship later.
+  Work authorisation and sponsorship answers are transcribed into
+  screening_answers and reused verbatim; they live only in master-facts.json,
+  which is gitignored.
   Still blank and must be answered by the human before submit is enabled:
   willing_to_relocate, desired_salary, notice_period, years_of_experience.
 - Notifications will use Discord (Slack needs a workspace). notify.js renders
