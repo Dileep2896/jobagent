@@ -186,8 +186,16 @@ const DEFAULT_ENGINEERING_SIGNALS = [
 const NON_US_LOCATION =
   /\b(india|bangalore|bengaluru|hyderabad|pune|gurgaon|noida|chennai|mumbai|delhi|london|manchester|dublin|ireland|scotland|singapore|tokyo|osaka|japan|toronto|vancouver|montreal|ottawa|canada|berlin|munich|hamburg|frankfurt|germany|amsterdam|netherlands|paris|france|barcelona|madrid|spain|milan|rome|italy|lisbon|portugal|bucharest|romania|warsaw|poland|prague|czech|vienna|austria|zurich|geneva|switzerland|stockholm|sweden|oslo|norway|copenhagen|denmark|helsinki|finland|brussels|belgium|dublin|sydney|melbourne|australia|auckland|new zealand|mexico city|cdmx|guadalajara|mexico|brazil|s(a|ã)o paulo|bogot(a|á)|colombia|buenos aires|argentina|santiago|chile|lima|peru|bangkok|thailand|jakarta|indonesia|manila|philippines|kuala lumpur|malaysia|ho chi minh|vietnam|seoul|korea|taipei|taiwan|hong kong|shanghai|beijing|shenzhen|china|tel aviv|israel|dubai|abu dhabi|uae|riyadh|saudi|cairo|egypt|lagos|nigeria|nairobi|kenya|johannesburg|cape town|south africa)\b/i;
 
+// NOTE: bare "remote" and "anywhere" are deliberately NOT here.
+//
+// "Remote - United Kingdom" is remote and is not US, and listing "remote" as a
+// US signal let exactly that posting through the pre-filter — after which the
+// model shortlisted it at 3.8 while its own reason said "Hard blocker: UK
+// residency requirement". Dropping them is strictly safer: a posting listed only
+// as "Remote" names no non-US country, so it never reaches this override and
+// survives on its own.
 const US_LOCATION_SIGNAL =
-  /\b(united states|u\.?s\.?a?\b|usa|remote|anywhere|new york|nyc|san francisco|sf\b|bay area|seattle|chicago|austin|boston|denver|atlanta|los angeles|la\b|san diego|portland|miami|dallas|houston|philadelphia|washington|dc\b|nashville|phoenix|salt lake|minneapolis|detroit|pittsburgh|raleigh|charlotte|columbus|amer\b|north america|hybrid)\b/i;
+  /\b(united states|u\.?s\.?a?\b|usa|new york|nyc|san francisco|sf\b|bay area|seattle|chicago|austin|boston|denver|atlanta|los angeles|la\b|san diego|portland|miami|dallas|houston|philadelphia|washington|dc\b|nashville|phoenix|salt lake|minneapolis|detroit|pittsburgh|raleigh|charlotte|columbus|amer\b|north america|hybrid)\b/i;
 
 /** Word-boundary regex over a term list, with every term escaped. */
 function termRegex(terms) {
@@ -704,7 +712,19 @@ async function classify(job) {
 /** Score, classify and commit one verdict. Shared by the per-job and batch paths. */
 async function commitVerdict(job, verdict) {
   const score = computeGlobal(verdict);
-  const status = score >= SHORTLIST_THRESHOLD ? STATUS.SHORTLISTED : STATUS.FILTERED_OUT;
+  // A stated hard blocker vetoes, whatever the arithmetic says.
+  //
+  // computeGlobal only ever DISCOUNTS for red flags (RED_FLAG_PENALTY, capped),
+  // so a role that scores well on every dimension can clear the threshold while
+  // the model is explicitly saying it is not viable. It happened: a Databricks
+  // FDE role in the UK was shortlisted at 3.8 with the reason "Hard blocker: UK
+  // residency requirement incompatible...". The model did its job and the code
+  // ignored it. hard_blockers are defined as "any one of these means the role is
+  // not viable" — that is a veto, not a deduction.
+  const vetoed = (verdict.red_flags || []).find((f) => /hard blocker/i.test(String(f)));
+  const status = vetoed ? STATUS.FILTERED_OUT
+    : score >= SHORTLIST_THRESHOLD ? STATUS.SHORTLISTED : STATUS.FILTERED_OUT;
+  if (vetoed) log(`job ${job.id}: vetoed by a stated hard blocker despite ${score.toFixed(1)}/5 — ${String(vetoed).slice(0, 80)}`);
 
   const breakdown = {
     cv_match: verdict.cv_match,
