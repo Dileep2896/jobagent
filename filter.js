@@ -66,6 +66,7 @@ const STATUS = {
 // ---------------------------------------------------------------------------
 const MODEL = 'claude-haiku-4-5';
 const BATCH_SIZE = 20;
+const BATCH_API_CLAIM = 250; // per Message Batch; the API handles far more
 const CONCURRENCY = 4; // 4-core box on wifi; keep in-flight calls modest
 const MAX_ATTEMPTS = 4; // per job, across runs, before giving up
 const MAX_RETRIES = 5; // per API call, within one attempt
@@ -424,16 +425,47 @@ async function reclaimStaleClaims() {
  * Atomically take up to `limit` queued jobs. SKIP LOCKED means a second copy
  * of this script picks up a disjoint set instead of blocking.
  */
-async function claimBatch(limit) {
+/**
+ * Claim ordering, and why it is not just ORDER BY id.
+ *
+ * ids are grouped by company in discovery order, so on a 141-company watchlist
+ * a capped run (--limit 300 against 4,566 queued) would spend the whole budget
+ * on whichever companies sit at the front — 300 Databricks postings and nothing
+ * else. --spread round-robins by company instead, so a capped run samples across
+ * all of them and actually says something about verdict quality.
+ *
+ * --board scopes to one ATS. Greenhouse is the only board that currently ends in
+ * a submitted application, so it is worth being able to spend there first.
+ */
+async function claimBatch(limit, opts = {}) {
+  const { board, spread } = opts;
+  const scope = board ? `AND c.board = $5` : '';
+  const params = [STATUS.NEW, MAX_ATTEMPTS, limit, STATUS.CLAIMED];
+  if (board) params.push(board);
+
+  // Ranking happens in `picked`, locking in `claimed`. They cannot be one step:
+  // Postgres rejects "FOR UPDATE is not allowed with window functions", so the
+  // row_number() that spreads across companies has to be resolved into a plain
+  // id list before anything is locked.
+  const order = spread
+    ? `row_number() OVER (PARTITION BY j.${SCHEMA.companyId} ORDER BY j.${SCHEMA.id}), j.${SCHEMA.id}`
+    : `j.${SCHEMA.id}`;
+
   const { rows } = await pool.query(
-    `WITH claimed AS (
-       SELECT ${SCHEMA.id}
-         FROM ${SCHEMA.jobsTable}
-        WHERE ${SCHEMA.status} = $1
-          AND ${SCHEMA.filterAttempts} < $2
-        ORDER BY ${SCHEMA.id}
-          FOR UPDATE SKIP LOCKED
+    `WITH picked AS (
+       SELECT j.${SCHEMA.id} AS id
+         FROM ${SCHEMA.jobsTable} j
+         JOIN ${SCHEMA.companiesTable} c ON c.${SCHEMA.id} = j.${SCHEMA.companyId}
+        WHERE j.${SCHEMA.status} = $1
+          AND j.${SCHEMA.filterAttempts} < $2
+          ${scope}
+        ORDER BY ${order}
         LIMIT $3
+     ),
+     claimed AS (
+       SELECT ${SCHEMA.id} FROM ${SCHEMA.jobsTable}
+        WHERE ${SCHEMA.id} IN (SELECT id FROM picked)
+          FOR UPDATE SKIP LOCKED
      )
      UPDATE ${SCHEMA.jobsTable} j
         SET ${SCHEMA.status} = $4,
@@ -441,7 +473,7 @@ async function claimBatch(limit) {
        FROM claimed
       WHERE j.${SCHEMA.id} = claimed.${SCHEMA.id}
      RETURNING j.${SCHEMA.id}`,
-    [STATUS.NEW, MAX_ATTEMPTS, limit, STATUS.CLAIMED]
+    params
   );
 
   if (rows.length === 0) return [];
@@ -982,6 +1014,16 @@ async function main() {
   const once = args.includes('--once');
   const useBatch = args.includes('--batch');
   const noWait = args.includes('--no-wait');
+  const spread = args.includes('--spread');
+  const boardFlag = args.indexOf('--board');
+  const board = boardFlag >= 0 ? args[boardFlag + 1] : null;
+  if (boardFlag >= 0 && !['greenhouse', 'lever', 'ashby'].includes(board)) {
+    throw new Error('--board must be greenhouse, lever or ashby');
+  }
+  // The Message Batches API is built for large batches; BATCH_SIZE=20 is sized
+  // for the per-job concurrency path. Claiming 20 at a time in batch mode means
+  // 15 round trips to filter 300 jobs, each waiting on its own batch to finish.
+  const claimSize = useBatch ? BATCH_API_CLAIM : BATCH_SIZE;
   const limitFlag = args.indexOf('--limit');
   const limit = limitFlag >= 0 ? Number(args[limitFlag + 1]) : Infinity;
 
@@ -1010,7 +1052,7 @@ async function main() {
     const remaining = limit - processed;
     if (remaining <= 0) break;
 
-    const jobs = await claimBatch(Math.min(BATCH_SIZE, remaining));
+    const jobs = await claimBatch(Math.min(claimSize, remaining), { board, spread });
     if (jobs.length === 0) {
       if (once) {
         log('no jobs with status=new; done');
