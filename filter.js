@@ -167,6 +167,27 @@ const DEFAULT_ENGINEERING_SIGNALS = [
   'full-stack', 'mobile', 'android', 'ios', 'security engineer',
 ];
 
+// Locations that are outside the candidate's stated geography, and the signals
+// that override them.
+//
+// targets.locations is "San Francisco Bay Area" and "Remote (US)", and
+// hard_blockers includes "Requires relocation outside the United States", so a
+// posting in Bengaluru is a rejection the facts file already implies. The model
+// was being paid ~2,080 tokens to reach that conclusion: 10 of its first 19
+// rejections were location, and 288 of the 734 postings on this box name a
+// clearly non-US location. At the scale of a large watchlist that is the
+// difference between affordable and not.
+//
+// Deliberately fail-OPEN: a location must clearly name somewhere non-US AND
+// carry no US or remote signal. Empty, vague ("AMER"), multi-site and
+// US-inclusive strings all survive to the model, because a false negative here
+// is a job silently never applied to.
+const NON_US_LOCATION =
+  /\b(india|bangalore|bengaluru|hyderabad|pune|gurgaon|noida|chennai|mumbai|delhi|london|manchester|dublin|ireland|scotland|singapore|tokyo|osaka|japan|toronto|vancouver|montreal|ottawa|canada|berlin|munich|hamburg|frankfurt|germany|amsterdam|netherlands|paris|france|barcelona|madrid|spain|milan|rome|italy|lisbon|portugal|bucharest|romania|warsaw|poland|prague|czech|vienna|austria|zurich|geneva|switzerland|stockholm|sweden|oslo|norway|copenhagen|denmark|helsinki|finland|brussels|belgium|dublin|sydney|melbourne|australia|auckland|new zealand|mexico city|cdmx|guadalajara|mexico|brazil|s(a|ã)o paulo|bogot(a|á)|colombia|buenos aires|argentina|santiago|chile|lima|peru|bangkok|thailand|jakarta|indonesia|manila|philippines|kuala lumpur|malaysia|ho chi minh|vietnam|seoul|korea|taipei|taiwan|hong kong|shanghai|beijing|shenzhen|china|tel aviv|israel|dubai|abu dhabi|uae|riyadh|saudi|cairo|egypt|lagos|nigeria|nairobi|kenya|johannesburg|cape town|south africa)\b/i;
+
+const US_LOCATION_SIGNAL =
+  /\b(united states|u\.?s\.?a?\b|usa|remote|anywhere|new york|nyc|san francisco|sf\b|bay area|seattle|chicago|austin|boston|denver|atlanta|los angeles|la\b|san diego|portland|miami|dallas|houston|philadelphia|washington|dc\b|nashville|phoenix|salt lake|minneapolis|detroit|pittsburgh|raleigh|charlotte|columbus|amer\b|north america|hybrid)\b/i;
+
 /** Word-boundary regex over a term list, with every term escaped. */
 function termRegex(terms) {
   const escaped = terms
@@ -195,6 +216,15 @@ const TITLE_RULES = loadTitleRules();
  * Null means "the model still has to look at this one".
  */
 function preFilter(job) {
+  // 1. Location. Cheapest of all, and the single biggest saving on a large
+  //    watchlist. See NON_US_LOCATION for why this is safe to decide in code.
+  const loc = String(job.location || '').trim();
+  if (loc && NON_US_LOCATION.test(loc) && !US_LOCATION_SIGNAL.test(loc)) {
+    const where = (loc.match(NON_US_LOCATION) || [])[0];
+    return `pre-filter: location "${loc.slice(0, 60)}" is outside the US (${where}) — targets.locations is US-only`;
+  }
+
+  // 2. Title.
   const title = String(job.title || '').trim();
   if (!title) return null; // no title is not evidence of anything
   if (!TITLE_RULES.exclude) return null;
@@ -923,7 +953,7 @@ async function processBatch(jobs) {
  */
 async function runPreFilterOnly(limit, dryRun) {
   const { rows } = await pool.query(
-    `SELECT ${SCHEMA.id} AS id, ${SCHEMA.title} AS title
+    `SELECT ${SCHEMA.id} AS id, ${SCHEMA.title} AS title, ${SCHEMA.location} AS location
        FROM ${SCHEMA.jobsTable}
       WHERE ${SCHEMA.status} = $1
       ORDER BY ${SCHEMA.id}
@@ -943,7 +973,7 @@ async function runPreFilterOnly(limit, dryRun) {
     }
   }
 
-  log(`pre-filter${dryRun ? ' (dry run)' : ''}: ${killed} of ${rows.length} disqualified by title, ` +
+  log(`pre-filter${dryRun ? ' (dry run)' : ''}: ${killed} of ${rows.length} disqualified (title or location), ` +
       `${rows.length - killed} still need the model — 0 API calls made`);
 }
 
