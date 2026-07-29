@@ -879,8 +879,14 @@ async function buildResume(job, facts, opts) {
   if (dryRun) return;
 
   fs.mkdirSync(outDir, { recursive: true });
+  // The job id disambiguates. Stripe posts "Backend Engineer, Payments and Risk"
+  // more than once (different teams and locations), so company+title alone
+  // produced ONE filename for TWO jobs: the second build silently overwrote the
+  // first, leaving job 74 pointing at a resume tailored to job 75's description.
+  // Guard 7 in submit.js cannot catch that — the filename matches what it
+  // expects for both — so uniqueness has to come from the name itself.
   const slug = `${job.company}_${job.title || 'role'}`.replace(/[^A-Za-z0-9]+/g, '_').slice(0, 60);
-  const base = `${facts.contact.name.replace(/[^A-Za-z0-9]+/g, '_')}_${slug}`;
+  const base = `${facts.contact.name.replace(/[^A-Za-z0-9]+/g, '_')}_${slug}_${job.id}`;
   const texPath = path.join(outDir, `${base}.tex`);
   const pdfPath = path.join(outDir, `${base}.pdf`);
 

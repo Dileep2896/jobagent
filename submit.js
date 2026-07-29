@@ -130,8 +130,10 @@ async function main() {
   // — Director of AI" resume to a Stripe backend application and every other
   // check passed it. That reaches a real employer under --auto.
   {
+    // Must mirror generate.js exactly, including the job-id suffix that keeps
+    // two identically-titled postings from sharing one file.
     const slug = `${job.company}_${job.title || 'role'}`.replace(/[^A-Za-z0-9]+/g, '_').slice(0, 60);
-    const expected = `${facts.contact.name.replace(/[^A-Za-z0-9]+/g, '_')}_${slug}`;
+    const expected = `${facts.contact.name.replace(/[^A-Za-z0-9]+/g, '_')}_${slug}_${job.id}`;
     const actual = path.basename(job.resume_path, '.pdf');
     if (actual !== expected) {
       throw new Error(
@@ -266,17 +268,22 @@ async function main() {
     }
 
     // ---- The only place anything is sent ---------------------------------
-    const btn = await page.$('button[type=submit], input[type=submit]');
-    const byText = btn || (await page.$$('button')).find
-      ? (await page.$$('button')).reduce(async (accP, b) => {
-          const acc = await accP;
-          if (acc) return acc;
-          const t = ((await b.innerText()) || '').trim();
-          return SUBMIT_RE.test(t) ? b : null;
-        }, Promise.resolve(null))
-      : null;
-    const submitEl = btn || (await byText);
-    if (!submitEl) throw new Error('could not find a submit control on the form');
+      // Prefer a real submit control; fall back to matching button text.
+      //
+      // This was written as `btn || (await page.$$('button')).find ? A : B`,
+      // which parses as `(btn || (...).find) ? A : B` — always truthy, because
+      // `.find` is an Array method. So the text scan ran even when btn was
+      // already found, walking every button for nothing. When the browser closed
+      // on an earlier error, those in-flight innerText() calls rejected with no
+      // handler and crashed the process instead of reporting the real failure.
+      let submitEl = await page.$('button[type=submit], input[type=submit]');
+      if (!submitEl) {
+        for (const b of await page.$$('button')) {
+          const t = ((await b.innerText().catch(() => '')) || '').trim();
+          if (SUBMIT_RE.test(t)) { submitEl = b; break; }
+        }
+      }
+      if (!submitEl) throw new Error('could not find a submit control on the form');
 
     // ---- Guard 8: the resume must still be attached AT THE CLICK ----------
     //

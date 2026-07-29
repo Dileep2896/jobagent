@@ -247,6 +247,11 @@ async function main() {
   //
   // Applied rows are still the ones that matter, and 'Applied' / 'How' stay
   // blank until they are, so the two are still distinguishable at a glance.
+  //
+  // "Has a resume" alone is NOT the test, though it was briefly: a resume on a
+  // filtered_out or unfiltered job is a debugging artefact, not something the
+  // human should act on. 43 of the first 45 resumes on this box were exactly
+  // that. The row has to represent a job the filter approved.
   const { rows: jobs } = await pool.query(
     `SELECT j.id, j.title, j.location, j.url, j.status, j.filter_score, j.filter_reason,
             j.first_seen_at, j.applied_at, j.applied_method, j.resume_drive_url,
@@ -254,7 +259,10 @@ async function main() {
             c.name AS company
        FROM jobs j
        JOIN companies c ON c.id = j.company_id
-      WHERE (j.applied_at IS NOT NULL OR j.resume_path IS NOT NULL)
+      WHERE (j.applied_at IS NOT NULL
+             OR (j.resume_path IS NOT NULL
+                 AND j.status IN ('shortlisted', 'generating', 'ready_for_review',
+                                  'applied', 'interview', 'rejected')))
         ${all ? '' : 'AND (j.sheet_synced_at IS NULL OR j.updated_at > j.sheet_synced_at)'}
       ORDER BY j.id`
   );
