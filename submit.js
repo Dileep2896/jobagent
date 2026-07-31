@@ -46,7 +46,8 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const { Pool } = require('pg');
-const { fillForm, auditRequired, applyUrlFor } = require('./lib/form-fill');
+const { fillForm, auditRequired, applyUrlFor, surveyOpenQuestions } = require('./lib/form-fill');
+const { writeAnswers } = require('./lib/answer-writer');
 
 const FACTS_PATH = process.env.MASTER_FACTS || 'master-facts.json';
 const SHOT_DIR = process.env.PREFILL_SHOTS || path.join(__dirname, 'build', 'prefill');
@@ -193,7 +194,28 @@ async function main() {
     await page.goto(applyUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
     await page.waitForTimeout(2500);
 
-    const res = await fillForm(page, facts, job.resume_path);
+
+    // Narrative questions the stored answers do not cover ("have you built AI
+    // agents?", "why this role?"). Surveyed first so the writer is called ONCE
+    // per job rather than once per question, and only for free-text areas —
+    // lib/answer-writer.js refuses anything the attestation list recognises,
+    // before any model call.
+    let generated;
+    if (!process.env.NO_GENERATED_ANSWERS) {
+      try {
+        const asks = await surveyOpenQuestions(page, facts);
+        if (asks.length) {
+          const written = await writeAnswers({ job, facts, questions: asks });
+          generated = written.answers;
+          for (const r of written.refused) log(`   ~ not written: ${r.question.slice(0, 60)} — ${r.reason}`);
+          if (written.answers.size) log(`wrote ${written.answers.size} narrative answer(s)`);
+        }
+      } catch (err) {
+        log(`answer-writer unavailable (${err.message.split('\n')[0]}) — those questions will stop for the human`);
+      }
+    }
+
+    const res = await fillForm(page, facts, job.resume_path, { generated });
     log(`filled ${res.filled.length}, unanswered ${res.unanswered.length}`);
 
     // ---- The pre-flight audit -------------------------------------------
