@@ -221,6 +221,21 @@ function loadTitleRules() {
 const TITLE_RULES = loadTitleRules();
 
 /**
+ * The role noun of a title, i.e. everything before the first qualifier.
+ *
+ * Job titles are "ROLE, QUALIFIER" — "Software Engineer, Backend, Marketing
+ * Product" is an engineering role; "Group Product Manager, Developer
+ * Infrastructure" is not. Both contain an engineering signal, so testing the
+ * rescue against the whole string cannot tell them apart.
+ *
+ * Splits on comma, paren, pipe, colon, slash and a SPACED hyphen only —
+ * "Full-stack" and "Front-end" must survive intact.
+ */
+function titleHead(title) {
+  return String(title).split(/[,(|:/]| [-–—] /)[0].trim() || String(title).trim();
+}
+
+/**
  * Returns a reason string when the title alone disqualifies the job, else null.
  * Null means "the model still has to look at this one".
  */
@@ -239,8 +254,15 @@ function preFilter(job) {
   if (!TITLE_RULES.exclude) return null;
   const hit = title.match(TITLE_RULES.exclude);
   if (!hit) return null;
-  if (TITLE_RULES.rescue && TITLE_RULES.rescue.test(title)) return null;
-  return `pre-filter: title names "${hit[1].toLowerCase()}" with no engineering signal — not a software engineering role`;
+  // The rescue is tested against the ROLE NOUN, not the whole title. Testing it
+  // against the whole string rescued everything on a 141-company watchlist:
+  // "Technical Recruiter | Engineering" and "Group Product Manager, Developer
+  // Infrastructure" both carry an engineering signal as a DOMAIN QUALIFIER, and
+  // the pre-filter disqualified 0 of 6,125 jobs as a result — it was live,
+  // reported success, and did nothing.
+  const head = titleHead(title);
+  if (TITLE_RULES.rescue && TITLE_RULES.rescue.test(head)) return null;
+  return `pre-filter: title names "${hit[1].toLowerCase()}" with no engineering signal in the role ("${head}") — not a software engineering role`;
 }
 
 /**
