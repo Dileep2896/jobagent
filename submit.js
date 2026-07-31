@@ -337,13 +337,42 @@ async function main() {
     log('submitting…');
     await submitEl.click();
     await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(4000);
+
+    // Poll for an outcome rather than screenshotting after a fixed 4s.
+    //
+    // 4s was not enough. On a real Greenhouse submission the button was still
+    // showing its spinner when the screenshot was taken, so the run reported
+    // "no confirmation" while the request was still in flight — indistinguishable
+    // in the log from a genuine rejection.
+    const CONFIRM_RE = /thank you|application received|we.{0,3}ve received|successfully submitted|thanks for applying|application submitted/;
+    let bodyText = '';
+    for (let waited = 0; waited < 30000; waited += 2000) {
+      await page.waitForTimeout(2000);
+      bodyText = ((await page.innerText('body').catch(() => '')) || '').toLowerCase();
+      if (CONFIRM_RE.test(bodyText)) break;
+    }
 
     const after = path.join(SHOT_DIR, `job-${job.id}-after-submit.png`);
     await page.screenshot({ path: after, fullPage: true });
 
-    const bodyText = ((await page.innerText('body').catch(() => '')) || '').toLowerCase();
-    const confirmed = /thank you|application received|we.{0,3}ve received|successfully submitted|thanks for applying|application submitted/.test(bodyText);
+    const confirmed = CONFIRM_RE.test(bodyText);
+
+    // Greenhouse can interpose an emailed security code before it will accept
+    // the application: the form comes back asking for a code sent to the
+    // applicant's address, and nothing is submitted until it is entered. That is
+    // a deliberate verification step, not a bug and not a transient failure, so
+    // it is named as its own blocker rather than reported as "could not be
+    // confirmed" — the two need completely different responses from a human.
+    if (!confirmed && /security code/i.test(bodyText)) {
+      await recordBlocker(
+        'Greenhouse emailed a security code and will not accept the application until it is entered. ' +
+        'Nothing was submitted. Open the form, paste the code from your inbox, and submit by hand.'
+      );
+      throw new Error(
+        `job ${job.id}: Greenhouse requires an emailed security code — nothing was submitted. ` +
+        `Complete it by hand. Screenshot: ${after}`
+      );
+    }
 
     // Recording 'applied' without proof is the worst outcome available: the
     // job is never retried, so a silently failed submission becomes a job you
