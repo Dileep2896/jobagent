@@ -199,3 +199,10 @@ CREATE TABLE IF NOT EXISTS approvals (
 -- ---------------------------------------------------------------------------
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS submit_blocker    text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS submit_checked_at timestamptz;
+
+-- Cover letters (2026-07-31). Generated per job from master-facts.json + the JD
+-- by lib/answer-writer.js, grounded the same way resume bullets are: nothing
+-- may be named that is not in the facts file or the posting.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cover_letter_path text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cover_letter_text text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS generated_answers jsonb;

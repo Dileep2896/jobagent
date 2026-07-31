@@ -415,6 +415,33 @@ function isTransient(err) {
   return TRANSIENT_CODES.includes(err.code);
 }
 
+/**
+ * Retry a whole API call on transient failure.
+ *
+ * The per-job path has always had this. The BATCH path did not, and a batch
+ * create is the single largest request this program makes: 250 job descriptions
+ * is a ~1.6 MB POST, sent from a box on wifi. One dropped connection threw
+ * straight out of main(), stranding all 250 claims in `filtering` and — worse —
+ * doing it in the window between `create` returning server-side and the id
+ * being written, which is the one case that can orphan a batch we paid for.
+ *
+ * Retrying the create is safe here because the failure is a connection drop
+ * with no id in hand: there is nothing to reconcile against. recoverOrphans()
+ * handles the case where a batch really was created and the id lost.
+ */
+async function withRetry(label, fn) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isTransient(err) || attempt === MAX_RETRIES) throw err;
+      const delay = retryDelayMs(err, attempt);
+      log(`${label}: ${err.message} — retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+}
+
 /** Honour Retry-After when the API sends one, else fall back to backoff. */
 function retryDelayMs(err, attempt) {
   const header = err?.headers?.get?.('retry-after');
@@ -912,6 +939,57 @@ async function harvestBatch(batchId, counts) {
 }
 
 /** Resume batches left in flight by a previous run, before claiming anything new. */
+/**
+ * Adopt a batch that exists on the server but whose id we never recorded.
+ *
+ * The window is narrow and real: `batches.create` can succeed server-side and
+ * then drop the response on the way back, which leaves jobs claimed with a NULL
+ * filter_batch_id and a paid-for batch nobody is going to read. Without this,
+ * the stale sweep eventually requeues those jobs and the next run pays to
+ * classify them a second time.
+ *
+ * Recovery is by custom_id, which is `job-<id>` and therefore self-identifying:
+ * any batch whose requests name jobs we currently hold claimed IS our batch.
+ */
+async function recoverOrphans() {
+  const { rows } = await pool.query(
+    `SELECT ${SCHEMA.id} AS id FROM ${SCHEMA.jobsTable}
+      WHERE ${SCHEMA.status} = $1 AND filter_batch_id IS NULL`,
+    [STATUS.CLAIMED]
+  );
+  if (!rows.length) return {};
+  const orphaned = new Set(rows.map((r) => `job-${r.id}`));
+  log(`${orphaned.size} claimed job(s) carry no batch id — checking the server for an orphaned batch`);
+
+  const counts = {};
+  let page;
+  try {
+    page = await withRetry('batches list', () => anthropic.messages.batches.list({ limit: 20 }));
+  } catch (err) {
+    log(`could not list batches (${err.message}) — leaving the claims for the stale sweep`);
+    return counts;
+  }
+
+  for (const batch of page.data || []) {
+    if (batch.processing_status !== 'ended') continue;
+    let owned = [];
+    try {
+      const results = await withRetry(`batch ${batch.id} results`, () =>
+        anthropic.messages.batches.results(batch.id)
+      );
+      for await (const r of results) if (orphaned.has(r.custom_id)) owned.push(r.custom_id);
+    } catch {
+      continue;
+    }
+    if (!owned.length) continue;
+    const ids = owned.map((c) => Number(c.slice(4)));
+    log(`batch ${batch.id} holds ${ids.length} of our orphaned job(s) — adopting it`);
+    await attachBatch(batch.id, ids);
+    await harvestBatch(batch.id, counts);
+  }
+  return counts;
+}
+
 async function resumeBatches() {
   const { rows } = await pool.query(
     `SELECT DISTINCT filter_batch_id AS id FROM ${SCHEMA.jobsTable}
@@ -966,9 +1044,11 @@ async function processBatchViaAPI(jobs, noWait) {
   }
   if (!remaining.length) return counts;
 
-  const batch = await anthropic.messages.batches.create({
-    requests: remaining.map((job) => ({ custom_id: `job-${job.id}`, params: buildRequestParams(job) })),
-  });
+  const batch = await withRetry('batch create', () =>
+    anthropic.messages.batches.create({
+      requests: remaining.map((job) => ({ custom_id: `job-${job.id}`, params: buildRequestParams(job) })),
+    })
+  );
   // Written before the first poll: a crash between create and this UPDATE is the
   // one window where a batch could be paid for and orphaned.
   await attachBatch(batch.id, remaining.map((j) => j.id));
@@ -1086,7 +1166,12 @@ async function main() {
   };
 
   // Finish what a previous run started before spending on anything new.
-  if (useBatch) add(await resumeBatches());
+  if (useBatch) {
+    // Orphans first: adopting a paid-for batch is free, and doing it before the
+    // stale sweep stops those jobs being requeued and classified twice.
+    add(await recoverOrphans());
+    add(await resumeBatches());
+  }
 
   let processed = 0;
 
