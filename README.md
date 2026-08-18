@@ -94,6 +94,263 @@ role in California.
 
 ---
 
+## The eight stages
+
+One pass of `run-daily.sh` is eight stages. Each one claims work in a single
+status, does **one unit**, commits, and moves on — so any stage can be killed
+mid-run and restarted without losing a written result. The `status` column is
+what makes that true.
+
+> These are the eight **stages**. The eight **guards** further down are a
+> different eight, and they all live inside stage 6.
+
+```mermaid
+flowchart TD
+    subgraph free ["free — no API calls"]
+        S1["1 · discover.js"]
+        S3["3 · generate.js"]
+        S4["4 · drive-upload.js"]
+    end
+    subgraph paid ["paid"]
+        S2["2 · filter.js"]
+    end
+    subgraph browser ["Playwright"]
+        S5["5 · prefill.js"]
+        S6["6 · submit.js"]
+    end
+    subgraph out ["outputs"]
+        S7["7 · sheets-sync.js"]
+        S8["8 · notify.js"]
+    end
+
+    S1 -->|"new"| S2
+    S2 -->|"shortlisted"| S3
+    S3 -->|"resume_path set"| S4
+    S4 --> S5
+    S5 -->|"ready_for_review"| S6
+    S6 -->|"applied"| S7
+    S7 --> S8
+
+    A["approve.js<br/><i>the human gate</i>"] -.->|"required unless --auto"| S6
+
+    style free fill:#1b5e20,color:#fff
+    style paid fill:#e65100,color:#fff
+    style A fill:#0d47a1,color:#fff
+```
+
+---
+
+### 1 · `discover.js` — find the postings
+
+Polls the public board API of every active company on the watchlist, normalises
+each posting, and upserts it deduped on `(company_id, external_id)`. Public
+documented endpoints only: no scraping, no authenticated calls, no LinkedIn. It
+identifies itself in its user agent and waits 1.5s between companies.
+
+The upsert refreshes content but **never touches `status`**. Rediscovery
+therefore cannot resurrect a job the filter already decided on, or make you pay
+to classify the same posting twice. One bad board doesn't abort the run.
+
+```mermaid
+flowchart LR
+    G["Greenhouse<br/>boards-api"] --> N["normalise<br/><i>HTML → text</i>"]
+    L["Lever<br/>api.lever.co"] --> N
+    A["Ashby<br/>posting-api"] --> N
+    N --> U{"seen before?"}
+    U -->|no| I["INSERT · status='new'"]
+    U -->|yes| M["UPDATE content only<br/><b>status untouched</b>"]
+
+    style M fill:#1b5e20,color:#fff
+```
+
+---
+
+### 2 · `filter.js` — decide what's worth applying to
+
+The only stage that costs money, so three layers sit in front of the model. A
+free title check, a free location check, then the Message Batches API at half
+price. The model returns **per-dimension scores only** — the global is a
+weighted average computed in code, because a score-only loop drifts toward
+whatever the model likes.
+
+Both free filters fail **open**: a job is dropped only on an unambiguous signal,
+since a false negative is a job silently never applied to.
+
+```mermaid
+flowchart TD
+    Q["status='new'"] --> C["claim a batch<br/><i>FOR UPDATE SKIP LOCKED</i>"]
+    C --> P1{"title excluded,<br/>no eng. signal?"}
+    P1 -->|yes| X["filtered_out<br/><b>0 tokens</b>"]
+    P1 -->|no| P2{"clearly non-US,<br/>no US signal?"}
+    P2 -->|yes| X
+    P2 -->|no| M["Haiku 4.5<br/><i>batch, half price</i>"]
+    M --> S["score in code<br/>.45 cv · .30 north star<br/>.15 culture · .10 comp"]
+    S -->|"≥ 3.5"| SH["shortlisted"]
+    S -->|"< 3.5"| X
+    C -.->|"crash"| R["stale sweep, 30 min<br/><i>skips in-flight batches</i>"]
+    R -.-> Q
+
+    style X fill:#424242,color:#fff
+    style M fill:#e65100,color:#fff
+    style SH fill:#1b5e20,color:#fff
+```
+
+---
+
+### 3 · `generate.js` — build the resume
+
+**Zero model calls.** Every bullet must map to an `id` in the facts file, which
+makes tailoring a selection problem: rank facts against the JD, keep the
+strongest, emit their text verbatim. Nothing is rewritten, so nothing can be
+invented.
+
+Then it compiles and checks its own output. If a gate fails the PDF is not
+accepted, and the fill loop grows or shrinks content to reach the bottom margin.
+
+```mermaid
+flowchart TD
+    F["master-facts.json"] --> R["rank facts vs JD"]
+    R --> SEL["select top N<br/><i>selection, not writing</i>"]
+    SEL --> T["render LaTeX"] --> C["pdflatex"]
+    C --> G{"gates"}
+    G -->|"fact coverage · ATS parse<br/>headings · 1 page<br/>no overfull hbox<br/>keywords ≥70% · page fill"| OK["ready_for_review"]
+    G -->|fail| ADJ["grow / shrink"] --> T
+
+    style F fill:#1b5e20,color:#fff
+    style G fill:#b71c1c,color:#fff
+```
+
+---
+
+### 4 · `drive-upload.js` — put the PDF somewhere you can reach it
+
+Every generated resume goes to a Drive folder so anything the agent can't submit
+can still be applied to by hand from a phone. Auth is split for a reason worth
+remembering: Drive uploads run **as you**, because a service account has no
+storage quota on a personal account and can't own a file outside a Shared Drive.
+
+```mermaid
+flowchart LR
+    P["resume.pdf"] --> A["ADC · authenticates AS YOU<br/><i>gcloud application-default</i>"]
+    A --> D["Drive folder<br/><i>drive.file scope only</i>"]
+    D --> U["jobs.resume_drive_url"]
+    U --> H["you apply by hand<br/>to anything blocked"]
+
+    style A fill:#0d47a1,color:#fff
+```
+
+---
+
+### 5 · `prefill.js` — fill the employer's real form
+
+A real browser opens the actual application form and fills what can be filled
+truthfully. **It cannot submit**: no code path clicks a submit control, and a
+network-layer route blocks a same-origin submission POST even if some future
+refactor tried.
+
+What it deliberately skips: demographic and EEO questions, and any screening
+question with no pre-written answer.
+
+```mermaid
+flowchart TD
+    O["open apply URL"] --> S["survey open questions"]
+    S --> W["answer-writer<br/><i>narrative only</i>"]
+    W --> FF["fillForm"]
+    FF --> F1["✓ filled<br/><i>name, email, links, resume</i>"]
+    FF --> F2["⊘ skipped<br/><i>EEO / demographic</i>"]
+    FF --> F3["! unanswered<br/><i>named for you</i>"]
+    F1 & F2 & F3 --> RR["ready_for_review"]
+    B["network guard<br/>aborts any submit POST"] -.-> O
+
+    style B fill:#b71c1c,color:#fff
+    style RR fill:#0d47a1,color:#fff
+```
+
+---
+
+### 6 · `submit.js` — the only irreversible step
+
+Dry run by default; `--confirm` is required to send. `approve.js` is a separate
+command on purpose — approving and sending are two decisions, and one flag that
+does both is how you send by accident. An approval covers one job, expires in
+24h, is single-use, and pins the resume file.
+
+Eight fail-closed guards run before the click, and a confirmation page is
+required after it. `--auto` replaces **guard 2 only**; every other guard stands.
+
+```mermaid
+flowchart TD
+    AP["approve.js<br/><i>24h · single-use · pins resume</i>"] --> G["8 guards, in order"]
+    G --> G5["5 · no required field empty"]
+    G5 --> G6["6 · a form was actually found"]
+    G6 --> G7["7 · resume belongs to THIS job"]
+    G7 --> G8["8 · still attached AT the click"]
+    G8 --> CL["click submit"]
+    CL --> V{"confirmation page?"}
+    V -->|no| K["stays ready_for_review<br/><b>approval NOT consumed</b>"]
+    V -->|yes| AD["applied"]
+    G -.->|"any guard fails"| BL["submit_blocker written<br/><i>exact question named</i>"]
+
+    style G fill:#b71c1c,color:#fff
+    style K fill:#e65100,color:#fff
+    style AD fill:#0d47a1,color:#fff
+```
+
+---
+
+### 7 · `sheets-sync.js` — the tracker
+
+Every job that got a **tailored resume**, not only the applied ones — otherwise
+a per-job PDF sits in Drive with no row pointing at it, which defeats the reason
+the upload stage exists. `Applied` and `How` stay blank until a real submission,
+so the two are still distinguishable at a glance. A filtered-out job with a
+resume is a debugging artefact and never gets a row.
+
+Postgres stays the source of truth; the sheet is a view you can annotate.
+Reconciliation is by **Job ID in column A**, not by remembered row number, so
+sorting or deleting rows by hand cannot corrupt the mapping.
+
+```mermaid
+flowchart LR
+    DB[("Postgres<br/><i>source of truth</i>")] --> W{"has a resume,<br/>or was applied to?"}
+    W -->|no| SK["no row<br/><i>nothing to act on</i>"]
+    W -->|yes| S["match on Job ID<br/><i>column A</i>"]
+    S -->|"new"| AP["append row"]
+    S -->|"exists"| UP["update outcome"]
+    S -->|"row deleted by hand"| RE["re-append"]
+    AP & UP & RE --> SH["Google Sheet<br/><i>a view, not a mirror</i>"]
+
+    style DB fill:#0d47a1,color:#fff
+    style SK fill:#424242,color:#fff
+```
+
+---
+
+### 8 · `notify.js` — tell the human
+
+Six scenarios, one Discord channel each, anything unset falling back to a single
+webhook. Every digest is a to-do list, not a receipt. A job is recorded in
+`notifications` **only after** the webhook carrying it succeeded, so a dead
+webhook re-sends next run instead of silently dropping jobs.
+
+```mermaid
+flowchart LR
+    D["discoveries<br/><i>roll-up only</i>"] --> WH["webhook per channel"]
+    SL["shortlist"] --> WH
+    RV["review · needs you"] --> WH
+    IN["interview"] --> WH
+    RJ["rejected"] --> WH
+    ER["errors"] --> WH
+    WH --> OK{"delivered?"}
+    OK -->|yes| N["INSERT notifications<br/><i>(job_id, scenario)</i>"]
+    OK -->|no| RT["retry next run"]
+
+    style N fill:#1b5e20,color:#fff
+    style RT fill:#e65100,color:#fff
+```
+
+---
+
 ## Two kinds of question
 
 Behind every free-text box on an application form sits one of two things, and

@@ -2,10 +2,20 @@
 'use strict';
 
 /**
- * Logs APPLIED jobs to a Google Sheet — one row per real submission, whether
- * the agent made it or you did by hand. Not a mirror of the whole pipeline:
- * a job appears only once applied_at is set, and its row then tracks the
- * outcome (applied -> interview / rejected).
+ * Logs jobs to a Google Sheet: every job that got a TAILORED RESUME, not only
+ * the ones applied to. Its row then tracks the outcome (applied -> interview /
+ * rejected).
+ *
+ * Applied-only was the original rule and was wrong. It left a per-job PDF
+ * sitting in Drive with no row pointing at it, which defeats the reason
+ * drive-upload.js exists: the human applies by hand to everything the agent
+ * cannot submit, and the sheet is where they find it. 'Applied' and 'How' stay
+ * blank until a real submission, so an applied job and a prepared one are still
+ * distinguishable at a glance.
+ *
+ * Still not a mirror of the pipeline. A job needs a resume AND a status the
+ * filter approved; a resume attached to a filtered_out or unfiltered job is a
+ * debugging artefact, not something the human should act on.
  *
  * Postgres stays the source of truth. The sheet is a view you can annotate;
  * nothing here reads your edits back into the database.

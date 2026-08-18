@@ -7,19 +7,27 @@
  *
  * This deliberately does NOT use the claude.ai Drive connector: that is scoped
  * to an interactive chat session, and this pipeline runs unattended from cron.
- * It authenticates as a Google service account instead, using only the
+ *
+ * It authenticates AS YOU, via Application Default Credentials, using only the
  * drive.file scope — which grants access to files this pipeline itself creates,
- * not to the rest of the Drive.
+ * not to the rest of the Drive. A service-account key is NOT usable here and is
+ * actively ignored (see getToken): an upload CREATES a file, and a service
+ * account has no storage quota on a personal Google account and cannot own a
+ * file outside a Workspace Shared Drive. sheets-sync.js is the opposite case —
+ * it only edits a sheet that already exists, so the service account is right
+ * there and wrong here.
  *
  * Setup (one time):
- *   1. Google Cloud Console > new project > enable the Google Drive API.
- *   2. IAM & Admin > Service Accounts > create one > Keys > add JSON key.
- *   3. Save the JSON on this box, e.g. ~/.config/jobagent/gdrive.json (chmod 600).
- *   4. Share the Drive folder with the service account's client_email, as Editor.
- *   5. export GOOGLE_APPLICATION_CREDENTIALS=~/.config/jobagent/gdrive.json
- *      export GDRIVE_FOLDER_ID=<the folder id>
+ *   1. Google Cloud Console > enable the Google Drive API on the project.
+ *   2. ./gcloud-login.sh — runs `gcloud auth application-default login` with
+ *      the openid, cloud-platform and drive.file scopes.
+ *   3. node drive-upload.js --init — creates the destination folder. It must be
+ *      created BY THIS APP: drive.file is a per-application grant, so a folder
+ *      made through any other client is invisible here even though you own it.
+ *   4. export GDRIVE_FOLDER_ID=<the id --init prints>
  *
- * Usage:  node drive-upload.js <file.pdf> [--name "Custom Name.pdf"]
+ * Usage:  node drive-upload.js <file.pdf> [--name "Custom Name.pdf"] [--job-id N]
+ *         node drive-upload.js --init           (create the folder, print its id)
  *         node drive-upload.js --check          (verify credentials only)
  */
 
@@ -48,21 +56,18 @@ const MIME_BY_EXT = {
 };
 
 async function getToken() {
-  // Two credential paths:
-  //  - GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account key, OR
-  //  - Application Default Credentials from `gcloud auth application-default
-  //    login`, which authenticate AS YOU.
+  // GoogleAuth would prefer a service-account key if GOOGLE_APPLICATION_
+  // CREDENTIALS is set, and for Drive uploads that key is exactly wrong — an
+  // upload CREATES a file, and a service account has no storage quota on a
+  // personal Google account. So the key is dropped here deliberately, leaving
+  // Application Default Credentials from `gcloud auth application-default
+  // login`, which authenticate AS YOU and make you the file's owner.
   //
-  // For a personal Gmail account the second is the only one that works for
-  // Drive: service accounts have no storage quota and cannot own a file
-  // outside a Workspace Shared Drive. Files created via ADC are owned by you
-  // and count against your own quota, which is what we want anyway.
-  // Drive uploads CREATE files, and a service account has no storage quota on
-  // a personal Google account — it cannot own a file outside a Workspace
-  // Shared Drive. So this path deliberately ignores any service-account key
-  // and authenticates as the user via ADC, which makes YOU the file owner.
-  // (sheets-sync.js is the opposite case: it only edits an existing sheet, so
-  // the service account is fine there.)
+  // The variable is set for a real reason, just not this one: sheets-sync.js
+  // only edits a sheet that already exists, creates nothing, and so does need
+  // the service account. Both scripts read the same .env with opposite
+  // requirements, so this one drops the key in its own process rather than
+  // asking you to keep the variable unset.
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
   const auth = new GoogleAuth({ scopes: SCOPES });
   try {
