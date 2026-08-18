@@ -12,7 +12,7 @@
 ![Postgres](https://img.shields.io/badge/Postgres-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-2EAD33?style=for-the-badge&logo=playwright&logoColor=white)
 ![LaTeX](https://img.shields.io/badge/LaTeX-008080?style=for-the-badge&logo=latex&logoColor=white)
-![Claude](https://img.shields.io/badge/Claude-Haiku_4.5-D97757?style=for-the-badge&logo=anthropic&logoColor=white)
+![Claude](https://img.shields.io/badge/Claude-Haiku_4.5_+_Sonnet_5-D97757?style=for-the-badge&logo=anthropic&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)
 
 <br/>
@@ -62,8 +62,9 @@ flowchart LR
 Every resume bullet must map to an `id` in a hand-written facts file. That turns
 *"write me a resume"* into a **selection problem**, not a writing problem.
 
-The generator makes **zero model calls** — there is nowhere for an invention to
-come from.
+The resume generator makes **zero model calls** — there is nowhere for an
+invention to come from. Where a model *does* write prose, it writes from the same
+facts and is checked against them.
 
 </td>
 <td width="33%" valign="top">
@@ -93,6 +94,42 @@ role in California.
 
 ---
 
+## Two kinds of question
+
+Behind every free-text box on an application form sits one of two things, and
+they are not the same kind of thing at all.
+
+| | **Attestation** | **Narrative** |
+|---|---|---|
+| Looks like | *"Are you authorized to work in the US?"* · *"Have you been convicted of a felony?"* · *"Expected salary?"* | *"Why do you want to work here?"* · *"Describe a project you're proud of"* |
+| Is | a statement of fact to an employer, actionable and verifiable | marketing prose about work you actually did |
+| Getting it wrong is | a false statement on a job application | badly written |
+| So it comes from | `master-facts.json` verbatim, or the application **pauses** | the model, from the same verified facts the resume is built from |
+
+`lib/answer-writer.js` writes the second and refuses the first. The split is
+matched deterministically *before* the model is called, and **defaults to
+refusing** when unsure — a false positive costs one paused application that you
+finish by hand; a false negative is a fabricated legal attestation sent under
+your name.
+
+The generated prose is then held to the same standard as the resume: every
+claim, number, and employer name in it must trace back to a verified fact, and
+text that fails those checks is discarded rather than sent.
+
+Cover letters are grounded the same way, but run on demand rather than as part of
+the nightly pass — a letter that fails its grounding check is never written at
+all:
+
+```bash
+node cover-letter.js --job-id N --dry-run   # print it, write nothing
+node cover-letter.js --pipeline --limit 5   # every job awaiting review
+```
+
+Set `NO_GENERATED_ANSWERS=1` to turn generated answers off entirely and fill
+every text box by hand.
+
+---
+
 ## The guards
 
 Eight fail-closed checks stand between a prepared application and a sent one.
@@ -113,9 +150,28 @@ when it mattered.**
 
 | Board | Discover | Resume | Prefill | Auto-submit |
 |---|:---:|:---:|:---:|:---|
-| **Greenhouse** | ✅ | ✅ | ✅ | ✅ &nbsp;works |
+| **Greenhouse** | ✅ | ✅ | ✅ | ⚠️ &nbsp;fills and audits; nothing sent yet |
 | **Lever** | ✅ | ✅ | ⚠️ | ❌ &nbsp;geocoded location field never renders headless |
-| **Ashby** | ✅ | ✅ | ⚠️ | ❌ &nbsp;free-text essay questions |
+| **Ashby** | ✅ | ✅ | ⚠️ | ❓ &nbsp;untested since narrative answers landed |
+
+**Nothing has been submitted yet.** 35 Greenhouse forms have been filled and
+audited, every one of them a dry run; no job has reached `applied` and no
+confirmation page has been verified. The submit path is built and guarded, not
+proven.
+
+Only Greenhouse has been exercised at all. Lever's blocker is structural: the
+visible "Current location" input is cosmetic, the real value lives in a hidden
+field set only by clicking a suggestion, and the dropdown returns nothing in
+headless Chromium — so the audit correctly refuses. Ashby was previously blocked
+by its free-text essay questions; `lib/answer-writer.js` is built for exactly
+those, but no Ashby job has reached prefill yet, so the box stays a question mark
+until one does.
+
+One Greenhouse caveat worth naming: some employers 302 the board URL to their own
+careers site, which is a description page with an *"Apply for this role"* button
+and **no form on it**. Guard 6 refuses those rather than reporting a vacuous pass.
+Reaching the real form means following that button into whatever the employer
+hosts behind it, which isn't built.
 
 Anything the agent can't submit still earns a tailored resume, a Drive link, and a
 tracker row marked **`YOU — apply by hand`**.
@@ -125,7 +181,8 @@ tracker row marked **`YOU — apply by hand`**.
 ## Quick start
 
 ```bash
-# 1. schema + watchlist (both idempotent)
+# 1. database, schema, watchlist (the last two are idempotent)
+createdb jobagent
 psql -d jobagent -f schema.sql
 psql -d jobagent -f companies-seed.sql
 
@@ -134,8 +191,9 @@ cp master-facts.example.json master-facts.json
 $EDITOR master-facts.json
 node validate-facts.js
 
-# 3. credentials
-cp .env.example .env    # ANTHROPIC_API_KEY, Discord webhooks, Google IDs
+# 3. credentials — every variable is documented in .env.example
+cp .env.example .env && chmod 600 .env
+$EDITOR .env            # ANTHROPIC_API_KEY, Discord webhook, Google IDs
 set -a; . ./.env; set +a
 
 # 4. find work — free, no API calls
@@ -181,9 +239,12 @@ These are enforced in code, not just documented.
 
 1. **Never invent resume content.** Every bullet maps to a fact id.
 2. **Never submit without approval.** The pipeline prepares everything and stops.
-3. **Screening questions are legal attestations.** Answered once by you, reused
-   verbatim, never inferred — a US work-authorisation answer is never given to a
-   question about another country.
+3. **Attestations are answered by you, never by a model.** Work authorisation,
+   sponsorship, criminal history, protected characteristics, clearance, salary:
+   answered once in your facts file, reused verbatim, never inferred — a US
+   work-authorisation answer is never given to a question about another country.
+   The model may write *narrative* answers and cover letters from verified facts;
+   the attestation/narrative split is matched in code and fails closed.
 4. **Deterministic gates alongside any model score.** Score-only loops converge on
    keyword stuffing.
 5. **Everything idempotent and resumable.** The box drops wifi.
@@ -194,7 +255,9 @@ These are enforced in code, not just documented.
 ## Stack
 
 **Node 22** · **Postgres 16** · **Playwright** · **LaTeX** (`pdflatex`, ATS-gated)
-· **Claude Haiku 4.5** (scoring only) · **Google Drive + Sheets** · **Discord**
+· **Claude Haiku 4.5** (scoring) · **Claude Sonnet 5** (narrative answers and
+cover letters — never resumes, never attestations) · **Google Drive + Sheets** ·
+**Discord**
 
 Runs headless on Ubuntu 24.04 — 4-core Skylake i5, no GPU, wifi only.
 
