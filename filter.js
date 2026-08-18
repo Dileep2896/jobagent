@@ -869,7 +869,13 @@ async function awaitBatch(batchId) {
   const deadline = Date.now() + BATCH_MAX_WAIT_MS;
   for (;;) {
     if (shuttingDown) return false;
-    const batch = await anthropic.messages.batches.retrieve(batchId);
+    // Retried: a poll is a tiny request, but it is made every 30s for as long
+    // as the batch runs, so on a flaky link it is the MOST likely call to fail.
+    // An unretried poll threw out of main() and killed the whole run while the
+    // batch it was waiting on completed normally on the server.
+    const batch = await withRetry(`batch ${batchId} poll`, () =>
+      anthropic.messages.batches.retrieve(batchId)
+    );
     if (batch.processing_status === 'ended') return true;
     if (Date.now() > deadline) throw new Error(`batch ${batchId} still ${batch.processing_status} after 24h`);
     const c = batch.request_counts || {};
@@ -892,7 +898,9 @@ async function harvestBatch(batchId, counts) {
   const byId = new Map(jobs.map((j) => [String(j.id), j]));
   const seen = new Set();
 
-  const results = await anthropic.messages.batches.results(batchId);
+  const results = await withRetry(`batch ${batchId} results`, () =>
+    anthropic.messages.batches.results(batchId)
+  );
   for await (const entry of results) {
     const jobId = String(entry.custom_id || '').replace(/^job-/, '');
     const job = byId.get(jobId);
