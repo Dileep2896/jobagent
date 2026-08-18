@@ -7,6 +7,12 @@ build/
 # Personal writing, not part of the project
 linkedin-post.md
 
+# My own study notes for talking about this project out loud. Written from the
+# repo, but it is my voice and my interview prep, not documentation for anyone
+# else — ARCHITECTURE.md is the version that belongs here.
+jobagent-explained.md
+jobagent-explained.pdf
+
 # My own application history — company, title and URL for every job I have
 # applied to by hand. No code reads it; it is mine, not the project's.
 already-applied.json
