@@ -6,3 +6,8 @@ build/
 
 # Personal writing, not part of the project
 linkedin-post.md
+
+# My own application history — company, title and URL for every job I have
+# applied to by hand. No code reads it; it is mine, not the project's.
+already-applied.json
+already applied/
