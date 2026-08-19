@@ -35,17 +35,28 @@ fills in the employer's form — and then stops and asks a human.
 flowchart LR
     A["🔍 discover"] --> B["🆓 pre-filter"]
     B --> C["🤖 score"]
-    C --> D["📄 resume"]
-    D --> E["✍️ prefill"]
+    C --> D["📄 build resume"]
+    D --> T{"📐 gates"}
+    T -->|"two pages, or a thin one,<br/>or a term the JD names<br/>and the page doesn't"| R["grow / shrink<br/><i>drop the weakest first</i>"]
+    R --> D
+    T -->|"all pass"| E["✍️ prefill"]
     E --> F{"🛡️ 8 guards"}
     F -->|pass| G["✅ submit"]
     F -->|fail| H["👤 you finish it"]
 
     style B fill:#1b5e20,color:#fff
+    style T fill:#b71c1c,color:#fff
+    style R fill:#e65100,color:#fff
     style F fill:#b71c1c,color:#fff
     style G fill:#0d47a1,color:#fff
     style H fill:#e65100,color:#fff
 ```
+
+No PDF leaves that loop until every gate passes: one page, filled to the bottom
+margin, every cited fact still extractable, and at least 70% of the terms the
+posting names that you actually own. It re-compiles up to 16 times to get there.
+A build that never satisfies them keeps its `shortlisted` status and its reason,
+rather than inventing a failure state — you can still apply to that one by hand.
 
 > 📐 **[Full architecture, with diagrams →](ARCHITECTURE.md)**
 
@@ -390,16 +401,49 @@ every text box by hand.
 ## The guards
 
 Eight fail-closed checks stand between a prepared application and a sent one.
-Three of them exist because of real failures:
+They run in order, and any one of them refuses the whole send.
 
-| # | Guard | Why it exists |
+| # | Guard | What it requires |
 |:---:|---|---|
-| 6 | **A form was actually found** | The audit passed on a page with *no form on it*. "No required field is empty" is trivially true when there are no fields. |
-| 7 | **The resume belongs to this job** | A resume tailored for a *different company* was about to be attached. Every other guard passed. |
-| 8 | **Still attached at the click** | The upload vanished between filling and clicking — the board tracks it in JS state, not the DOM. |
+| 1 | **Right state** | The job is at `ready_for_review`. Not shortlisted, not half-built. |
+| 2 | **A live approval** | An unexpired, unconsumed approval exists for this job id. |
+| 3 | **The approved resume** | The file on disk is the one that was approved. Rebuild it and the approval no longer describes what would be sent. |
+| 4 | **Not already sent** | `applied_at` is null. An application cannot be unsent, so it is never sent twice. |
+| 5 | **Nothing left empty** | After filling, no required control on the live form is still blank. The DOM is re-read rather than trusting what the fill step reported. |
+| 6 | **A form was actually found** | A resume upload was accepted and at least 3 fields were filled. |
+| 7 | **The resume belongs to this job** | The filename matches what the generator builds for *this* company, title and job id. |
+| 8 | **Still attached at the click** | The filename is visible on the page immediately before clicking, with no required-field error showing. |
 
-All three are the same lesson: **evidence that was true when gathered, and not
-when it mattered.**
+Then one more after the click: a **confirmation page** must be detected, or the
+job stays at `ready_for_review` with its approval intact. Recording `applied`
+without proof is the worst outcome available, because the job is never retried
+and a silently failed submission becomes one you never notice.
+
+`--auto` replaces **guard 2 only**. The audit becomes the approver, an approval
+row is still written as `approved_by='auto'`, and the other seven stand
+untouched.
+
+### The three that were paid for
+
+Guards 6, 7 and 8 exist because of real failures, and they are the same lesson
+three times.
+
+**6 — the audit passed on a page with no form on it.** Some employers redirect
+the board URL to their own careers site, which is a description page with an
+apply button and no inputs. Zero fields filled, zero fields empty, audit clean.
+"No required field is empty" is trivially true when there are no fields.
+
+**7 — a resume tailored for a different company was about to be attached.**
+Every other guard passed it. Nothing in the system was checking that the
+document matched the job, because `resume_path` is just a string.
+
+**8 — the upload vanished between filling and clicking.** The board uploads to
+S3 and then removes the file input from the DOM, tracking the file in its own
+JS state. Guard 6 proved the resume was attached minutes and nineteen fields
+earlier. A real submission was rejected with "Resume/CV is required" while every
+one of our guards had passed.
+
+All three: **evidence that was true when gathered, and not when it mattered.**
 
 ---
 
